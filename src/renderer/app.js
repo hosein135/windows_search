@@ -440,9 +440,11 @@
     el.innerHTML = `
       <div class="hw-block">
         <h4>Connection</h4>
+        <div class="hw-line"><span class="chip chip-ok">MongoDB online</span></div>
         <div class="hw-line">URL: <code>${esc(info.mongoUrl)}</code></div>
         <div class="hw-line">Database: <b>${esc(info.dbName)}</b></div>
         <div class="hw-line">Collection: <b>${esc(info.collection)}</b></div>
+        ${info.warning ? `<div class="hw-line muted">Warning: ${esc(info.warning)}</div>` : ''}
       </div>
       ${renderMongoDirBlock(info)}
       <div class="hw-block">

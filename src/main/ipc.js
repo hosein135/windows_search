@@ -281,17 +281,22 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       dirInfo,
     };
 
+    // Prefer the same probe the status chip uses (connect + ping). A failed
+    // collStats/listDatabases must not mark the whole tab "offline" when mongod
+    // is actually reachable - mongodb driver v6 removed collection.stats().
+    const st = await db.status();
+    if (!st.ok) {
+      return { ok: false, error: st.error || 'Cannot reach mongod', ...base };
+    }
+
     try {
       await db.connect();
       const d = db.rawDb();
-
-      // Collection stats
       const col = db.persons();
-      const count = await col.estimatedDocumentCount();
-      const stats = await col.stats().catch(() => ({}));
+      const count = await col.estimatedDocumentCount().catch(() => st.persons || 0);
+      // collStats replaces removed Collection#stats() in mongodb@6
+      const stats = await d.command({ collStats: db.PERSONS_COLLECTION }).catch(() => ({}));
       const indexes = await col.indexes().catch(() => []);
-
-      // List all databases
       const allDbs = await d.admin().listDatabases().catch(() => ({ databases: [] }));
 
       return {
@@ -307,8 +312,19 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
         allDatabases: allDbs.databases || [],
       };
     } catch (err) {
-      // Still return the on-disk mongo/ folder so the Storage tab is useful offline.
-      return { ok: false, error: err.message, ...base };
+      // Connected (status chip would be green) but a secondary query failed —
+      // still report online with whatever we have, plus the error as a warning.
+      return {
+        ok: true,
+        ...base,
+        documentCount: st.persons || 0,
+        storageSizeMB: 0,
+        dataSizeMB: 0,
+        indexSizeMB: 0,
+        indexes: [],
+        allDatabases: [],
+        warning: err.message,
+      };
     }
   });
 }
