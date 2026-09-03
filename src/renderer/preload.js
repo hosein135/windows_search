@@ -8,7 +8,9 @@ contextBridge.exposeInMainWorld('api', {
   scanFiles: () => ipcRenderer.invoke('files:scan'),
   search: (q) => ipcRenderer.invoke('search:run', q),
   startImport: (opts) => ipcRenderer.invoke('import:start', opts),
+  importFile: (opts) => ipcRenderer.invoke('import:file', opts),
   cancelImport: () => ipcRenderer.invoke('import:cancel'),
+  storageInfo: () => ipcRenderer.invoke('storage:info'),
   onImportProgress: (cb) => {
     const fn = (_e, payload) => cb(payload);
     ipcRenderer.on('import:progress', fn);

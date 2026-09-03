@@ -390,7 +390,8 @@ Add-VfoxSdkToMachinePath -ExeName "mongod.exe"
 
 # vfox installs are per-user (not a Windows service), so we start mongod
 # manually as a background process on the default port 27017.
-$mongoDataDir = Join-Path $PSScriptRoot "data\db"
+# Data is stored in .\mongo\ so the user can see exactly where MongoDB keeps its files.
+$mongoDataDir = Join-Path $PSScriptRoot "mongo"
 New-Item -ItemType Directory -Force -Path $mongoDataDir | Out-Null
 
 Refresh-SessionPath -WingetPackagesRoot $wingetPackagesRoot
@@ -410,7 +411,7 @@ if (Get-Command mongod -ErrorAction SilentlyContinue) {
     if ($listener) {
         Write-Host "MongoDB is listening on port 27017." -ForegroundColor Green
     } else {
-        Write-Host "MongoDB may still be starting; check with: mongod --dbpath data\db" -ForegroundColor Yellow
+        Write-Host "MongoDB may still be starting; check with: mongod --dbpath mongo" -ForegroundColor Yellow
     }
 } else {
     Write-Host "mongod not found on PATH after vfox install. Open a new admin PowerShell and re-run." -ForegroundColor Yellow
@@ -452,3 +453,5 @@ Write-Host "  1. Drop the CSV dump folders into .\databases\   (bank mellat, ban
 Write-Host "  2. Optional demo data:  npm run make-sample" -ForegroundColor White
 Write-Host "  3. Headless import:     npm run import" -ForegroundColor White
 Write-Host "  4. Start the GUI:       npm start" -ForegroundColor White
+Write-Host "" -ForegroundColor DarkGray
+Write-Host "MongoDB data files are stored in .\mongo\" -ForegroundColor DarkGray

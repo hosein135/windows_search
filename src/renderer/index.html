@@ -19,6 +19,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="search">Search</button>
     <button class="tab" data-tab="import">Import</button>
+    <button class="tab" data-tab="storage">Storage</button>
     <button class="tab" data-tab="hardware">Hardware</button>
   </nav>
 
@@ -49,17 +50,23 @@
         <input type="checkbox" id="chk-gpu-normalize" checked />
         Use GPU for Persian text normalization (WebGPU, falls back to CPU)
       </label>
-      <button id="btn-import" class="primary" disabled>Start import</button>
+      <button id="btn-import" class="primary" disabled>Import selected files</button>
       <button id="btn-cancel" disabled>Cancel</button>
     </div>
-    <div id="import-summary" class="muted">Scans <code>databases\</code> recursively for the known CSV layouts.</div>
+    <div id="import-summary" class="muted">Scans <code>databases\</code> recursively for the known CSV layouts. Each file has its own Import button for file-by-file mode.</div>
     <div class="progress-outer"><div id="import-bar" class="progress-inner"></div></div>
     <table class="results">
       <thead>
-        <tr><th>Import</th><th>File</th><th>Layout</th><th>Size</th><th>Rows</th><th>Persons</th><th>Skipped</th><th>Rows/s</th><th>State</th></tr>
+        <tr><th>Select</th><th>Import</th><th>File</th><th>Layout</th><th>Size</th><th>Rows</th><th>Persons</th><th>Skipped</th><th>Rows/s</th><th>State</th></tr>
       </thead>
       <tbody id="files-body"></tbody>
     </table>
+  </section>
+
+  <!-- ============================ STORAGE =========================== -->
+  <section id="tab-storage" class="tab-page">
+    <button id="btn-storage-refresh">Refresh storage info</button>
+    <div id="storage-content" class="muted">Click "Refresh storage info" to see MongoDB storage details.</div>
   </section>
 
   <!-- =========================== HARDWARE =========================== -->

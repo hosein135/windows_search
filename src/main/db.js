@@ -3,10 +3,11 @@
 /** MongoDB connection + collection/index management. */
 
 const { MongoClient } = require('mongodb');
+const fs = require('fs');
 
 const DEFAULT_URL = process.env.MONGO_URL || 'mongodb://127.0.0.1:27017';
 const DB_NAME = process.env.MONGO_DB || 'windows_search';
-const PERSONS = 'persons';
+const PERSONS_COLLECTION = 'persons';
 
 let client = null;
 let db = null;
@@ -30,7 +31,12 @@ async function close() {
 
 function persons() {
   if (!db) throw new Error('Not connected to MongoDB');
-  return db.collection(PERSONS);
+  return db.collection(PERSONS_COLLECTION);
+}
+
+function rawDb() {
+  if (!db) throw new Error('Not connected to MongoDB');
+  return db;
 }
 
 /**
@@ -62,4 +68,4 @@ async function status() {
   }
 }
 
-module.exports = { connect, close, persons, ensureIndexes, status, DEFAULT_URL, DB_NAME };
+module.exports = { connect, close, persons, rawDb, ensureIndexes, status, DEFAULT_URL, DB_NAME, PERSONS_COLLECTION };

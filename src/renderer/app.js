@@ -157,10 +157,12 @@
     const known = filesCache.filter((f) => f.known);
     $('#import-summary').innerHTML =
       `${filesCache.length} CSV file(s) found, ${known.length} with a known layout - ` +
-      `${fmtSize(filesCache.reduce((a, f) => a + f.sizeBytes, 0))} total.`;
+      `${fmtSize(filesCache.reduce((a, f) => a + f.sizeBytes, 0))} total.` +
+      (known.length ? ' Use each file\'s Import button for file-by-file mode, or Import selected files for batch.' : '');
     $('#files-body').innerHTML = filesCache.map((f, i) => `
       <tr data-path="${esc(f.path)}">
         <td><input type="checkbox" class="file-chk" data-i="${i}" ${f.known ? 'checked' : 'disabled'} /></td>
+        <td><button class="btn-import-one" data-i="${i}" ${f.known ? '' : 'disabled'}>Import</button></td>
         <td>${esc(f.folder)} / ${esc(f.name)}</td>
         <td>${esc(f.sourceLabel)}</td>
         <td>${fmtSize(f.sizeBytes)}</td>
@@ -168,6 +170,11 @@
         <td class="c-rate">-</td><td class="c-state">pending</td>
       </tr>`).join('');
     $('#btn-import').disabled = !known.length;
+
+    // Wire per-file import buttons
+    document.querySelectorAll('.btn-import-one').forEach((btn) => {
+      btn.addEventListener('click', () => importOneFile(Number(btn.dataset.i)));
+    });
   }
 
   function updateFileRow(fileName, p) {
@@ -190,23 +197,136 @@
   $('#btn-import').addEventListener('click', async () => {
     const selected = [...document.querySelectorAll('.file-chk:checked')]
       .map((c) => filesCache[Number(c.dataset.i)].path);
+    if (!selected.length) return;
     $('#btn-import').disabled = true;
     $('#btn-cancel').disabled = false;
+    // Disable all per-file buttons during batch import
+    document.querySelectorAll('.btn-import-one').forEach((b) => b.disabled = true);
     const res = await window.api.startImport({
       files: selected,
       gpuNormalize: $('#chk-gpu-normalize').checked,
     });
     $('#btn-import').disabled = false;
     $('#btn-cancel').disabled = true;
+    document.querySelectorAll('.btn-import-one').forEach((b) => b.disabled = false);
     if (res.error) $('#import-summary').textContent = res.error;
     else $('#import-summary').textContent =
       `Import ${res.cancelled ? 'cancelled' : 'finished'}: ${res.totals.persons.toLocaleString()} persons from ` +
       `${res.totals.rows.toLocaleString()} rows (${res.totals.skipped.toLocaleString()} empty rows skipped, ` +
       `${res.totals.errors.toLocaleString()} errors).`;
     refreshStatus();
+    refreshStorage();
   });
 
+  async function importOneFile(i) {
+    const f = filesCache[i];
+    if (!f || !f.known) return;
+    // Disable buttons during single-file import
+    const btn = document.querySelector(`.btn-import-one[data-i="${i}"]`);
+    if (btn) btn.disabled = true;
+    $('#btn-import').disabled = true;
+    const row = [...document.querySelectorAll('#files-body tr')]
+      .find((tr) => tr.dataset.path === f.path);
+    if (row) row.querySelector('.c-state').textContent = 'importing...';
+
+    const res = await window.api.importFile({
+      file: f,
+      gpuNormalize: $('#chk-gpu-normalize').checked,
+    });
+
+    if (btn) btn.disabled = false;
+    $('#btn-import').disabled = false;
+
+    if (res.error) {
+      if (row) row.querySelector('.c-state').textContent = `error: ${res.error}`;
+    } else {
+      const s = res.stats;
+      if (row) {
+        row.querySelector('.c-rows').textContent = s.rows.toLocaleString();
+        row.querySelector('.c-persons').textContent = s.persons.toLocaleString();
+        row.querySelector('.c-skipped').textContent = s.skipped.toLocaleString();
+        row.querySelector('.c-state').textContent = res.cancelled ? 'cancelled' : 'done';
+      }
+      $('#import-summary').textContent =
+        `${f.name}: ${s.persons.toLocaleString()} persons from ${s.rows.toLocaleString()} rows ` +
+        `(${s.skipped.toLocaleString()} skipped, ${s.errors.toLocaleString()} errors).`;
+    }
+    refreshStatus();
+    refreshStorage();
+  }
+
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
+
+  /* ---------------------------- storage ---------------------------- */
+  async function refreshStorage() {
+    const el = $('#storage-content');
+    el.innerHTML = 'Loading...';
+    const info = await window.api.storageInfo();
+    if (!info.ok) {
+      el.innerHTML = `<span class="chip chip-bad">MongoDB offline</span><br><span class="muted">${esc(info.error || '')}</span>`;
+      return;
+    }
+
+    const idxRows = (info.indexes || []).map((ix) => `
+      <tr>
+        <td>${esc(ix.name)}</td>
+        <td><code>${esc(ix.keys)}</code></td>
+        <td>${ix.unique ? 'yes' : '-'}</td>
+        <td>${ix.sparse ? 'yes' : '-'}</td>
+      </tr>`).join('');
+
+    const dbRows = (info.allDatabases || []).map((d) => `
+      <tr>
+        <td>${esc(d.name)}</td>
+        <td>${d.sizeOnDisk ? fmtSize(d.sizeOnDisk) : '-'}</td>
+        <td>${d.empty ? 'empty' : 'has data'}</td>
+      </tr>`).join('');
+
+    el.innerHTML = `
+      <div class="hw-block">
+        <h4>Connection</h4>
+        <div class="hw-line">URL: <code>${esc(info.mongoUrl)}</code></div>
+        <div class="hw-line">Database: <b>${esc(info.dbName)}</b></div>
+        <div class="hw-line">Collection: <b>${esc(info.collection)}</b></div>
+      </div>
+      <div class="hw-block">
+        <h4>Data directory (MongoDB storage files)</h4>
+        <div class="hw-line">Path: <code>${esc(info.dataDir)}</code></div>
+        <div class="hw-line">Exists: ${info.dirInfo.exists ? 'yes' : 'no (mongod not started with this dbpath)'}</div>
+        ${info.dirInfo.exists ? `<div class="hw-line">Total size: <b>${info.dirInfo.sizeMB} MB</b></div>` : ''}
+        ${info.dirInfo.exists && info.dirInfo.files.length ? `
+          <div class="hw-line muted">Files (${info.dirInfo.files.length}):</div>
+          <div class="hw-line muted" style="font-size:11px;max-height:120px;overflow:auto">${info.dirInfo.files.map(esc).join('<br>')}</div>` : ''}
+      </div>
+      <div class="hw-block">
+        <h4>Collection statistics</h4>
+        <table class="results" style="margin-top:4px">
+          <tr><th>Documents</th><th>Data size</th><th>Storage size</th><th>Index size</th></tr>
+          <tr>
+            <td><b>${info.documentCount.toLocaleString()}</b></td>
+            <td>${info.dataSizeMB} MB</td>
+            <td>${info.storageSizeMB} MB</td>
+            <td>${info.indexSizeMB} MB</td>
+          </tr>
+        </table>
+      </div>
+      <div class="hw-block">
+        <h4>Indexes (${(info.indexes || []).length})</h4>
+        <table class="results" style="margin-top:4px">
+          <thead><tr><th>Name</th><th>Keys</th><th>Unique</th><th>Sparse</th></tr></thead>
+          <tbody>${idxRows}</tbody>
+        </table>
+      </div>
+      <div class="hw-block">
+        <h4>All databases on this server</h4>
+        <table class="results" style="margin-top:4px">
+          <thead><tr><th>Database</th><th>Size</th><th>Status</th></tr></thead>
+          <tbody>${dbRows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  $('#btn-storage-refresh').addEventListener('click', refreshStorage);
 
   window.api.onImportProgress((p) => {
     if (p.phase === 'all-done') { $('#import-bar').style.width = '100%'; return; }
@@ -234,6 +354,7 @@
     await renderHardware(false);
     await refreshStatus();
     await scanFiles();
+    await refreshStorage();
     setInterval(refreshStatus, 15_000);
   })();
 })();
