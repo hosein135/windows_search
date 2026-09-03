@@ -102,6 +102,24 @@ function Add-VfoxSdkToMachinePath {
     return $true
 }
 
+function Invoke-Vfox {
+    <# Wrapper that relaxes $ErrorActionPreference around vfox calls so stderr
+       progress output doesn't throw under 'Stop'. Returns $LASTEXITCODE. #>
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+    $prevEAP = $ErrorActionPreference
+    $prevNative = $null
+    if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+        $prevNative = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $ErrorActionPreference = 'Continue'
+    & vfox @Args 2>&1 | Out-Host
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prevEAP
+    if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
+    return $code
+}
+
 function Install-VfoxSdk {
     param(
         [Parameter(Mandatory = $true)][string]$Plugin,
@@ -109,15 +127,16 @@ function Install-VfoxSdk {
     )
     # vfox install returns non-zero when the version is already installed;
     # treat that as success, not failure.
-    vfox install "${Plugin}@${Version}" 2>&1 | Out-Host
-    if ($LASTEXITCODE -ne 0) {
+    $exitCode = Invoke-Vfox install "${Plugin}@${Version}"
+
+    if ($exitCode -ne 0) {
         # Check if it's already installed (not a real failure)
-        $list = vfox list $Plugin 2>&1
+        $list = Invoke-Vfox list $Plugin
         if ($list -match [regex]::Escape($Version)) {
             Write-Host "  $Plugin@$Version is already installed." -ForegroundColor Green
             return $true
         }
-        Write-Host "  vfox install $Plugin@$Version failed (exit $LASTEXITCODE)." -ForegroundColor Yellow
+        Write-Host "  vfox install $Plugin@$Version failed (exit $exitCode)." -ForegroundColor Yellow
         return $false
     }
     return $true
@@ -316,14 +335,14 @@ if (Get-Command vfox -ErrorAction SilentlyContinue) {
 
 ## 5. INSTALL AND APPLY NODE.JS $nodeTargetVersion LOCALLY & GLOBALLY
 Write-Host "Adding Node.js plugin to vfox..." -ForegroundColor Yellow
-vfox add nodejs 2>&1 | Out-Null
+Invoke-Vfox add nodejs | Out-Null
 
 Write-Host "Installing Node.js version $nodeTargetVersion..." -ForegroundColor Yellow
 Install-VfoxSdk -Plugin "nodejs" -Version $nodeTargetVersion | Out-Null
 
 Write-Host "Activating Node.js $nodeTargetVersion globally and for the current session..." -ForegroundColor Yellow
-vfox use -g "nodejs@$nodeTargetVersion"
-vfox use -p "nodejs@$nodeTargetVersion"
+Invoke-Vfox use -g "nodejs@$nodeTargetVersion" | Out-Null
+Invoke-Vfox use -p "nodejs@$nodeTargetVersion" | Out-Null
 
 # Activate so Get-Command can find node.exe in this session
 if (Get-Command vfox -ErrorAction SilentlyContinue) {
@@ -336,7 +355,7 @@ Add-VfoxSdkToMachinePath -ExeName "node.exe"
 ## 6. INSTALL AND APPLY MONGODB $mongoTargetVersion LOCALLY & GLOBALLY (via vfox)
 Write-Section "Bootstrap: MongoDB (vfox)"
 Write-Host "Adding mongod plugin to vfox..." -ForegroundColor Yellow
-vfox add mongod 2>&1 | Out-Null
+Invoke-Vfox add mongod | Out-Null
 
 Write-Host "Installing MongoDB version $mongoTargetVersion..." -ForegroundColor Yellow
 $mongoInstalled = Install-VfoxSdk -Plugin "mongod" -Version $mongoTargetVersion
@@ -351,8 +370,8 @@ if (-not $mongoInstalled) {
 if ($mongoInstalled) {
     Write-Host "Activating MongoDB $mongoTargetVersion globally and for the current session..." -ForegroundColor Yellow
     # vfox use may also fail if the plugin can't reach GitHub; ignore errors.
-    try { vfox use -g "mongod@$mongoTargetVersion" 2>&1 | Out-Null } catch {}
-    try { vfox use -p "mongod@$mongoTargetVersion" 2>&1 | Out-Null } catch {}
+    try { Invoke-Vfox use -g "mongod@$mongoTargetVersion" | Out-Null } catch {}
+    try { Invoke-Vfox use -p "mongod@$mongoTargetVersion" | Out-Null } catch {}
     if (Get-Command vfox -ErrorAction SilentlyContinue) {
         Invoke-Expression "$(vfox activate pwsh)"
     }
