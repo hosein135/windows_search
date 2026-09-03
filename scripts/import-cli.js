@@ -3,17 +3,15 @@
 /**
  * Headless importer with multiple acceleration modes:
  *
- *   npm run import                                    # sequential, file-by-file
- *   npm run import -- --parallel                      # all CPU cores: chunked files + direct writes
- *   npm run import -- --parallel --workers 4          # parallel, 4 worker threads
- *   npm run import -- --parallel --inflight 3         # 3 concurrent bulkWrites per worker
- *   npm run import -- --parallel --chunk-mb 64        # force 64 MB chunks (default: auto)
- *   npm run import -- --parallel --no-split           # one task per file (no chunking)
- *   npm run import -- --file "Bank Mellat DB1.csv"    # single file (chunked when --parallel)
- *   npm run import -- --parallel --file "935-1.csv" --file "936-1.csv"
- *
- * Bun runtime (faster I/O, zero code changes):
- *   bun scripts/import-cli.js --parallel
+ *   bun run import                                    # sequential, file-by-file
+ *   bun run import -- --parallel                      # all CPU cores: chunked files + direct writes
+ *   bun run import -- --parallel --workers 4          # parallel, 4 worker threads
+ *   bun run import -- --parallel --inflight 3         # 3 concurrent bulkWrites per worker
+ *   bun run import -- --parallel --chunk-mb 64        # force 64 MB chunks (default: auto)
+ *   bun run import -- --parallel --no-split           # one task per file (no chunking)
+ *   bun run import -- --file "Bank Mellat DB1.csv"    # single file (chunked when --parallel)
+ *   bun run import -- --parallel --file "935-1.csv" --file "936-1.csv"
+ *   bun scripts/import-cli.js --parallel              # same as import:parallel, no extra npm layer
  *
  * The GUI offers GPU text normalization; the CLI always uses the CPU folder
  * (same normalize.js rules) because WebGPU needs a Chromium renderer.
@@ -81,7 +79,7 @@ function fmtMB(bytes) { return `${(bytes / 1e6).toFixed(1)} MB`; }
 
   if (!toImport.length) {
     console.log('[import] no known CSV layouts found. Drop the dumps into databases\\');
-    console.log('         or generate demo data with:  npm run make-sample');
+    console.log('         or generate demo data with:  bun run make-sample');
     process.exit(0);
   }
   for (const f of toImport) {

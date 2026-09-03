@@ -202,7 +202,7 @@ class FakeCollection {
     } catch { return null; }
   })();
   if (!canReach) {
-    console.log('  SKIP  mongod not reachable at mongodb://127.0.0.1:27017 - run setup.ps1, then re-run npm run smoke');
+    console.log('  SKIP  mongod not reachable at mongodb://127.0.0.1:27017 - run setup.ps1, then re-run bun run smoke');
   } else {
     const db = canReach;
     await ok('import sample + search against live mongod', async () => {

@@ -202,12 +202,88 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
 
   /* ------------------------------ storage -------------------------------- */
 
+  /** Recursively sum bytes under dir; list top-level names (files + dirs). */
+  function readMongoDataDir(mongoDir) {
+    const dirInfo = {
+      path: mongoDir,
+      exists: false,
+      sizeMB: 0,
+      fileCount: 0,
+      entries: [], // top-level: { name, kind: 'file'|'dir', sizeMB }
+      files: [], // flat names for older UI; kept as entry names
+    };
+    try {
+      if (!fs.existsSync(mongoDir)) return dirInfo;
+      dirInfo.exists = true;
+
+      let totalBytes = 0;
+      let fileCount = 0;
+      const walk = (d) => {
+        let entries;
+        try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+        for (const e of entries) {
+          const p = path.join(d, e.name);
+          if (e.isDirectory()) walk(p);
+          else if (e.isFile()) {
+            fileCount += 1;
+            try { totalBytes += fs.statSync(p).size; } catch { /* ignore */ }
+          }
+        }
+      };
+      walk(mongoDir);
+      dirInfo.sizeMB = Math.round(totalBytes / 1048576 * 10) / 10;
+      dirInfo.fileCount = fileCount;
+
+      const top = fs.readdirSync(mongoDir, { withFileTypes: true });
+      for (const e of top) {
+        const p = path.join(mongoDir, e.name);
+        let size = 0;
+        try {
+          if (e.isDirectory()) {
+            // size of this subtree
+            const stack = [p];
+            while (stack.length) {
+              const cur = stack.pop();
+              let kids;
+              try { kids = fs.readdirSync(cur, { withFileTypes: true }); } catch { continue; }
+              for (const k of kids) {
+                const kp = path.join(cur, k.name);
+                if (k.isDirectory()) stack.push(kp);
+                else if (k.isFile()) {
+                  try { size += fs.statSync(kp).size; } catch { /* ignore */ }
+                }
+              }
+            }
+          } else if (e.isFile()) {
+            size = fs.statSync(p).size;
+          }
+        } catch { /* ignore */ }
+        dirInfo.entries.push({
+          name: e.name,
+          kind: e.isDirectory() ? 'dir' : 'file',
+          sizeMB: Math.round(size / 1048576 * 10) / 10,
+        });
+      }
+      dirInfo.entries.sort((a, b) => a.name.localeCompare(b.name));
+      dirInfo.files = dirInfo.entries.map((e) => (e.kind === 'dir' ? `${e.name}/` : e.name));
+    } catch { /* ignore */ }
+    return dirInfo;
+  }
+
   ipcMain.handle('storage:info', async () => {
+    const mongoDir = path.resolve(path.join(databasesDir, '..', 'mongo'));
+    const dirInfo = readMongoDataDir(mongoDir);
+    const base = {
+      mongoUrl: db.DEFAULT_URL,
+      dbName: db.DB_NAME,
+      collection: db.PERSONS_COLLECTION,
+      dataDir: mongoDir,
+      dirInfo,
+    };
+
     try {
       await db.connect();
       const d = db.rawDb();
-      const dbName = db.DB_NAME;
-      const mongoDir = path.join(databasesDir, '..', 'mongo');
 
       // Collection stats
       const col = db.persons();
@@ -218,28 +294,9 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       // List all databases
       const allDbs = await d.admin().listDatabases().catch(() => ({ databases: [] }));
 
-      // Data directory info
-      const dirInfo = { path: mongoDir, exists: false, sizeMB: 0, files: [] };
-      try {
-        if (fs.existsSync(mongoDir)) {
-          dirInfo.exists = true;
-          const files = fs.readdirSync(mongoDir);
-          dirInfo.files = files.filter((f) => /\.(wt|bson|bson\.meta|loc|index)$/i.test(f));
-          let totalSize = 0;
-          for (const f of files) {
-            try { totalSize += fs.statSync(path.join(mongoDir, f)).size; } catch { /* ignore */ }
-          }
-          dirInfo.sizeMB = Math.round(totalSize / 1048576 * 10) / 10;
-        }
-      } catch { /* ignore */ }
-
       return {
         ok: true,
-        mongoUrl: db.DEFAULT_URL,
-        dbName,
-        collection: db.PERSONS_COLLECTION,
-        dataDir: mongoDir,
-        dirInfo,
+        ...base,
         documentCount: count,
         storageSizeMB: stats.storageSize ? Math.round(stats.storageSize / 1048576 * 10) / 10 : 0,
         dataSizeMB: stats.size ? Math.round(stats.size / 1048576 * 10) / 10 : 0,
@@ -250,7 +307,8 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
         allDatabases: allDbs.databases || [],
       };
     } catch (err) {
-      return { ok: false, error: err.message };
+      // Still return the on-disk mongo/ folder so the Storage tab is useful offline.
+      return { ok: false, error: err.message, ...base };
     }
   });
 }

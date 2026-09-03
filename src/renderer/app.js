@@ -379,12 +379,45 @@
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
 
   /* ---------------------------- storage ---------------------------- */
+  function renderMongoDirBlock(info) {
+    const di = info.dirInfo || { exists: false, sizeMB: 0, entries: [], files: [], fileCount: 0 };
+    const entries = di.entries && di.entries.length
+      ? di.entries
+      : (di.files || []).map((name) => ({ name, kind: name.endsWith('/') ? 'dir' : 'file', sizeMB: null }));
+    const entryRows = entries.map((e) => {
+      const label = e.kind === 'dir' ? `${e.name}/` : e.name;
+      const size = (e.sizeMB != null) ? `${e.sizeMB} MB` : '-';
+      return `<tr><td><code>${esc(label)}</code></td><td>${e.kind === 'dir' ? 'folder' : 'file'}</td><td>${size}</td></tr>`;
+    }).join('');
+    return `
+      <div class="hw-block">
+        <h4>Data directory (MongoDB storage files)</h4>
+        <div class="hw-line">Path: <code>${esc(info.dataDir || di.path || '')}</code></div>
+        <div class="hw-line">Exists: ${di.exists ? 'yes' : 'no (run setup.cmd / start mongod --dbpath mongo)'}</div>
+        ${di.exists ? `<div class="hw-line">Total size on disk: <b>${di.sizeMB} MB</b> (${(di.fileCount || 0).toLocaleString()} file(s), recursive)</div>` : ''}
+        ${di.exists && entryRows ? `
+          <table class="results" style="margin-top:6px;max-height:180px;display:block;overflow:auto">
+            <thead><tr><th>Name</th><th>Type</th><th>Size</th></tr></thead>
+            <tbody>${entryRows}</tbody>
+          </table>` : ''}
+      </div>`;
+  }
+
   async function refreshStorage() {
     const el = $('#storage-content');
     el.innerHTML = 'Loading...';
     const info = await window.api.storageInfo();
+
     if (!info.ok) {
-      el.innerHTML = `<span class="chip chip-bad">MongoDB offline</span><br><span class="muted">${esc(info.error || '')}</span>`;
+      el.innerHTML = `
+        <div class="hw-block">
+          <h4>Connection</h4>
+          <div class="hw-line"><span class="chip chip-bad">MongoDB offline</span></div>
+          <div class="hw-line muted">${esc(info.error || 'Cannot reach mongod')}</div>
+          <div class="hw-line muted">Expected URL: <code>${esc(info.mongoUrl || 'mongodb://127.0.0.1:27017')}</code></div>
+          <div class="hw-line muted">Start with: <code>mongod --dbpath mongo --port 27017 --bind_ip 127.0.0.1</code> (or re-run setup.cmd)</div>
+        </div>
+        ${renderMongoDirBlock(info)}`;
       return;
     }
 
@@ -410,15 +443,7 @@
         <div class="hw-line">Database: <b>${esc(info.dbName)}</b></div>
         <div class="hw-line">Collection: <b>${esc(info.collection)}</b></div>
       </div>
-      <div class="hw-block">
-        <h4>Data directory (MongoDB storage files)</h4>
-        <div class="hw-line">Path: <code>${esc(info.dataDir)}</code></div>
-        <div class="hw-line">Exists: ${info.dirInfo.exists ? 'yes' : 'no (mongod not started with this dbpath)'}</div>
-        ${info.dirInfo.exists ? `<div class="hw-line">Total size: <b>${info.dirInfo.sizeMB} MB</b></div>` : ''}
-        ${info.dirInfo.exists && info.dirInfo.files.length ? `
-          <div class="hw-line muted">Files (${info.dirInfo.files.length}):</div>
-          <div class="hw-line muted" style="font-size:11px;max-height:120px;overflow:auto">${info.dirInfo.files.map(esc).join('<br>')}</div>` : ''}
-      </div>
+      ${renderMongoDirBlock(info)}
       <div class="hw-block">
         <h4>Collection statistics</h4>
         <table class="results" style="margin-top:4px">

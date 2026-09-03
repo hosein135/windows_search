@@ -45,7 +45,7 @@ const { getHardware } = require('../src/main/hardware');
   console.log(`  GPU processes       : ${hw.plan.gpuProcesses}`);
   console.log(`  CPU rank workers    : ${hw.plan.cpuRankWorkers} (GUI fallback when no GPU)`);
   console.log('');
-  console.log(`  Run:  npm run import -- --parallel --workers ${hw.plan.importWorkers} --inflight ${hw.plan.inflightWritesPerWorker}`);
+  console.log(`  Run:  bun scripts/import-cli.js --parallel --workers ${hw.plan.importWorkers} --inflight ${hw.plan.inflightWritesPerWorker}`);
   console.log('');
   console.log('='.repeat(64));
   console.log(' Pipeline involvement (who does what)');

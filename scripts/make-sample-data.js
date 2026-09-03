@@ -131,7 +131,7 @@ function main() {
   }
   write(path.join('irancell', '938-1.csv'), irCorrupt, ir4);
 
-  console.log('Done. Import with:  npm run import   (or start the GUI:  npm start)');
+  console.log('Done. Import with:  bun run import   (or start the GUI:  bun run start)');
 }
 
 main();

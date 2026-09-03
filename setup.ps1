@@ -2,7 +2,7 @@
 $ErrorActionPreference = 'Stop'
 
 # Bootstrap for the windows-search demo app:
-#   winget -> vfox -> Node.js 22.2.0 -> MongoDB 8.0.4 -> npm install
+#   winget -> vfox -> Node.js 22.2.0 -> MongoDB 8.0.4 -> Bun -> bun install
 # Both Node.js and MongoDB are installed and pinned via vfox (version-fox).
 # plus a host hardware inventory (GPU detection) like the render pipeline uses.
 
@@ -559,7 +559,7 @@ if ($bunInstalled) {
     }
     Add-VfoxSdkToMachinePath -ExeName "bun.exe"
 } else {
-    Write-Host "Bun install failed (optional - Node.js is the primary runtime)." -ForegroundColor Yellow
+    Write-Host "Bun install failed (CLI scripts expect bun; Node.js is still used by Electron)." -ForegroundColor Yellow
 }
 
 ## 8. FINAL PATH & ENVIRONMENT REFRESH FOR NODE / NPM / BUN
@@ -578,32 +578,44 @@ if (Get-Command bun -ErrorAction SilentlyContinue) { bun --version } else { Writ
 Show-HostHardwareInventory
 Show-PipelineInvolvement
 
-## 10. RUN NPM INSTALL IN THE SCRIPT'S DIRECTORY
-Write-Section "Bootstrap: npm install"
+## 10. INSTALL DEPENDENCIES (bun install, npm fallback)
+Write-Section "Bootstrap: bun install"
 if (Test-Path "package.json") {
-    Write-Host "Found package.json. Running 'npm install'..." -ForegroundColor Yellow
-    Write-Host "  (npm shows its own progress)" -ForegroundColor DarkGray
-    npm install
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "npm install completed successfully!" -ForegroundColor Green
+    if (Get-Command bun -ErrorAction SilentlyContinue) {
+        Write-Host "Found package.json. Running 'bun install'..." -ForegroundColor Yellow
+        bun install
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "bun install completed successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "bun install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        }
     } else {
-        Write-Host "npm install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        Write-Host "bun not on PATH; falling back to 'npm install'..." -ForegroundColor Yellow
+        npm install
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "npm install completed successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "npm install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        }
     }
 } else {
-    Write-Host "No package.json found in $PSScriptRoot. Skipping 'npm install'." -ForegroundColor Yellow
+    Write-Host "No package.json found in $PSScriptRoot. Skipping install." -ForegroundColor Yellow
 }
 
 ## 11. RUNTIME HARDWARE REPORT FROM THE APP ITSELF (same detection the GUI uses - not hardcoded)
 Write-Section "App runtime detection (scripts\hardware-cli.js)"
 $hwCli = Join-Path $PSScriptRoot "scripts\hardware-cli.js"
-if ((Test-Path -LiteralPath $hwCli) -and (Get-Command node -ErrorAction SilentlyContinue)) {
+$hwRunner = $null
+if (Get-Command bun -ErrorAction SilentlyContinue) { $hwRunner = "bun" }
+elseif (Get-Command node -ErrorAction SilentlyContinue) { $hwRunner = "node" }
+if ((Test-Path -LiteralPath $hwCli) -and $hwRunner) {
     $prevNative = $null
     if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
         $prevNative = $PSNativeCommandUseErrorActionPreference
         $PSNativeCommandUseErrorActionPreference = $false
     }
     try {
-        & node $hwCli
+        & $hwRunner $hwCli
         if ($LASTEXITCODE -ne 0) { Write-Host "  Runtime report failed (exit $LASTEXITCODE)." -ForegroundColor Yellow }
     } catch {
         Write-Host "  Runtime report error: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -611,7 +623,7 @@ if ((Test-Path -LiteralPath $hwCli) -and (Get-Command node -ErrorAction Silently
         if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
     }
 } else {
-    Write-Host "  Skipped (node or scripts\hardware-cli.js missing)." -ForegroundColor Yellow
+    Write-Host "  Skipped (bun/node or scripts\hardware-cli.js missing)." -ForegroundColor Yellow
 }
 
 Write-Section "Done"
@@ -624,11 +636,10 @@ if ([int]$script:HostInventory.HardwareGpuCount -gt 0) {
 
 Write-Host "==> Recommended commands for THIS machine ($planThreads threads, $planGpus hardware GPU adapter(s)):" -ForegroundColor Green
 Write-Host "  1. Drop the CSV dump folders into .\databases\   (bank mellat, bank melli, ...)" -ForegroundColor White
-Write-Host "  2. Optional demo data:   npm run make-sample" -ForegroundColor White
-Write-Host "  3. All-core import:      npm run import -- --parallel --workers $planThreads --inflight 2" -ForegroundColor White
+Write-Host "  2. Optional demo data:   bun run make-sample" -ForegroundColor White
+Write-Host "  3. All-core import:      bun scripts/import-cli.js --parallel --workers $planThreads --inflight 2" -ForegroundColor White
 Write-Host "     (chunked by byte range; add --chunk-mb 64 to tune, --no-split for whole files)" -ForegroundColor DarkGray
-Write-Host "  4. Bun import (faster):  bun scripts/import-cli.js --parallel --workers $planThreads" -ForegroundColor White
-Write-Host "  5. Start the GUI:        npm start" -ForegroundColor White
+Write-Host "  4. Start the GUI:        bun run start" -ForegroundColor White
 if ($planGpus -ge 2) {
     Write-Host "     -> main window on the high-performance GPU + $($planGpus - 1) pinned helper process(es) on the other adapter(s);" -ForegroundColor DarkGray
     Write-Host "        the GUI import panel folds text on every GPU and ranks searches on every GPU" -ForegroundColor DarkGray
@@ -637,9 +648,9 @@ if ($planGpus -ge 2) {
 } else {
     Write-Host "     -> no hardware GPU here: CPU worker pool ranks; import folds on the CPU" -ForegroundColor DarkGray
 }
-Write-Host "  6. GPU blocklisted / WebGPU missing in the GUI?   npm run start:gpu-unsafe" -ForegroundColor White
-Write-Host "  7. Debug on one GPU only:                         npm run start:no-helpers" -ForegroundColor White
-Write-Host "  8. Re-print this hardware plan any time:          npm run hardware" -ForegroundColor White
+Write-Host "  5. GPU blocklisted / WebGPU missing in the GUI?   bun run start:gpu-unsafe" -ForegroundColor White
+Write-Host "  6. Debug on one GPU only:                         bun run start:no-helpers" -ForegroundColor White
+Write-Host "  7. Re-print this hardware plan any time:          bun run hardware" -ForegroundColor White
 Write-Host ""
 Write-Host "Legend:" -ForegroundColor DarkGray
 Write-Host "  NVIDIA / AMD dGPU = discrete GPU: main window's WebGPU device (--force-high-performance-gpu), weight 4 in sharding" -ForegroundColor DarkGray
