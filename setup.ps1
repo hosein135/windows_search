@@ -36,13 +36,15 @@ function Refresh-SessionPath {
     }
 
     # vfox installs SDKs under ~/.vfox/sdks (vfox < 1.0) or ~/.version-fox/sdks (vfox >= 1.0)
-    # Add any mongod.exe found there to PATH.
+    # Add any node.exe / mongod.exe found there to the current session PATH.
     foreach ($sdkRoot in @("$HOME\.vfox\sdks", "$HOME\.version-fox\sdks")) {
         if (-not (Test-Path $sdkRoot)) { continue }
-        $exe = Get-ChildItem -Path $sdkRoot -Recurse -Filter "mongod.exe" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($exe -and ($env:Path -notlike "*$($exe.DirectoryName)*")) {
-            $env:Path = "$($exe.DirectoryName);$env:Path"
+        foreach ($exeName in @("node.exe", "mongod.exe")) {
+            $exe = Get-ChildItem -Path $sdkRoot -Recurse -Filter $exeName -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($exe -and ($env:Path -notlike "*$($exe.DirectoryName)*")) {
+                $env:Path = "$($exe.DirectoryName);$env:Path"
+            }
         }
     }
 
@@ -50,6 +52,46 @@ function Refresh-SessionPath {
     if ((Test-Path $vfoxHome) -and ($env:Path -notlike "*$vfoxHome*")) {
         $env:Path = "$vfoxHome;$env:Path"
     }
+}
+
+function Add-VfoxSdkToMachinePath {
+    param([Parameter(Mandatory = $true)][string]$ExeName)
+
+    # Search both vfox SDK roots (vfox < 1.0 uses ~/.vfox, vfox >= 1.0 uses ~/.version-fox)
+    $exe = $null
+    foreach ($root in @("$HOME\.vfox\sdks", "$HOME\.version-fox\sdks")) {
+        if (Test-Path $root) {
+            $exe = Get-ChildItem -Path $root -Recurse -Filter $ExeName -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($exe) { break }
+        }
+    }
+    if (-not $exe) {
+        Write-Host "  WARNING: $ExeName not found in vfox SDK directories." -ForegroundColor Yellow
+        return $false
+    }
+
+    $binDir = $exe.DirectoryName
+
+    # Check if already in Machine PATH (persists for all future terminals)
+    $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+    if ($machinePath -like "*$binDir*") {
+        # Already permanent; just make sure current session has it
+        if ($env:Path -notlike "*$binDir*") { $env:Path = "$binDir;$env:Path" }
+        return $true
+    }
+
+    # Add to Machine PATH permanently so new CMD / PowerShell windows find it
+    $newMachinePath = "$binDir;$machinePath"
+    [System.Environment]::SetEnvironmentVariable("Path", $newMachinePath, "Machine")
+
+    # Update current session immediately
+    if ($env:Path -notlike "*$binDir*") {
+        $env:Path = "$binDir;$env:Path"
+    }
+
+    Write-Host "  Added $binDir to system PATH (permanent)" -ForegroundColor Green
+    return $true
 }
 
 function Show-HostHardwareInventory {
@@ -213,6 +255,9 @@ Write-Host "Activating Node.js $nodeTargetVersion globally and for the current s
 vfox use -g "nodejs@$nodeTargetVersion"
 vfox use -p "nodejs@$nodeTargetVersion"
 
+# Ensure node and npm are permanently on the system PATH for all future terminals
+Add-VfoxSdkToMachinePath -ExeName "node.exe"
+
 ## 6. INSTALL AND APPLY MONGODB $mongoTargetVersion LOCALLY & GLOBALLY (via vfox)
 Write-Section "Bootstrap: MongoDB (vfox)"
 Write-Host "Adding mongod plugin to vfox..." -ForegroundColor Yellow
@@ -224,6 +269,9 @@ vfox install "mongod@$mongoTargetVersion" -y
 Write-Host "Activating MongoDB $mongoTargetVersion globally and for the current session..." -ForegroundColor Yellow
 vfox use -g "mongod@$mongoTargetVersion"
 vfox use -p "mongod@$mongoTargetVersion"
+
+# Ensure mongod is permanently on the system PATH for all future terminals
+Add-VfoxSdkToMachinePath -ExeName "mongod.exe"
 
 # vfox installs are per-user (not a Windows service), so we start mongod
 # manually as a background process on the default port 27017.
