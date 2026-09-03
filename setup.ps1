@@ -127,6 +127,8 @@ function Install-VfoxSdk {
     )
     # vfox install returns non-zero when the version is already installed;
     # treat that as success, not failure.
+    Write-Host "  Downloading and installing $Plugin@$Version via vfox..." -ForegroundColor Cyan
+    Write-Host "  (vfox shows its own progress bar)" -ForegroundColor DarkGray
     $exitCode = Invoke-Vfox install "${Plugin}@${Version}"
 
     if ($exitCode -ne 0) {
@@ -139,7 +141,44 @@ function Install-VfoxSdk {
         Write-Host "  vfox install $Plugin@$Version failed (exit $exitCode)." -ForegroundColor Yellow
         return $false
     }
+    Write-Host "  $Plugin@$Version installed." -ForegroundColor Green
     return $true
+}
+
+function Download-File {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$Destination,
+        [string]$Label = "Downloading"
+    )
+    Write-Host "  $Label" -ForegroundColor Cyan
+    Write-Host "  URL: $Url" -ForegroundColor DarkGray
+
+    # Prefer curl.exe (Windows 10+) — shows a clean progress bar with speed
+    $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($curl) {
+        & curl.exe -L -# -o "$Destination" "$Url" 2>&1 | Out-Host
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $Destination)) {
+            $sizeMB = [math]::Round((Get-Item $Destination).Length / 1MB, 1)
+            Write-Host "  Done ($sizeMB MB)" -ForegroundColor Green
+            return $true
+        }
+    }
+
+    # Fallback: Invoke-WebRequest with PowerShell progress bar
+    $prevProgress = $ProgressPreference
+    $ProgressPreference = 'Continue'
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $Destination
+        $sizeMB = [math]::Round((Get-Item $Destination).Length / 1MB, 1)
+        Write-Host "  Done ($sizeMB MB)" -ForegroundColor Green
+        return $true
+    } catch {
+        Write-Host "  Download failed: $($_.Exception.Message)" -ForegroundColor Red
+        return $false
+    } finally {
+        $ProgressPreference = $prevProgress
+    }
 }
 
 function Show-HostHardwareInventory {
@@ -219,6 +258,7 @@ function Ensure-WingetPackage {
 
     if ($Version) {
         Write-Host "$Name not found. Installing version $Version via winget ($Id)..." -ForegroundColor Yellow
+        Write-Host "  (winget shows its own progress bar)" -ForegroundColor DarkGray
         winget install --id $Id --version $Version --exact --accept-source-agreements --accept-package-agreements
         if ($LASTEXITCODE -ne 0) {
             Write-Host "$Name $Version unavailable; trying latest $Id..." -ForegroundColor Yellow
@@ -226,6 +266,7 @@ function Ensure-WingetPackage {
         }
     } else {
         Write-Host "$Name not found. Installing latest via winget ($Id)..." -ForegroundColor Yellow
+        Write-Host "  (winget shows its own progress bar)" -ForegroundColor DarkGray
         winget install --id $Id --accept-source-agreements --accept-package-agreements
     }
 
@@ -242,11 +283,12 @@ Write-Section "Bootstrap: WinGet"
 if (!(Get-Command winget -ErrorAction SilentlyContinue)) {
     Write-Host "WinGet not found. Installing WinGet and App Installer dependencies..." -ForegroundColor Yellow
 
-    $progressPreference = 'silentlyContinue'
     $installUrl = "https://aka.ms/getwinget"
     $installerPath = "$env:TEMP\Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle"
 
-    Invoke-WebRequest -Uri $installUrl -OutFile $installerPath
+    $downloaded = Download-File -Url $installUrl -Destination $installerPath -Label "Downloading WinGet (App Installer)"
+    if (-not $downloaded) { throw "Failed to download WinGet." }
+
     Add-AppxPackage -Path $installerPath
     Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
 
@@ -266,7 +308,10 @@ $vfoxPackageId = "version-fox.vfox"
 
 if (!(Get-Command vfox -ErrorAction SilentlyContinue)) {
     Write-Host "Installing vfox version $vfoxVersion via winget..." -ForegroundColor Yellow
+    Write-Host "  (winget shows its own progress bar)" -ForegroundColor DarkGray
     winget install --id $vfoxPackageId --version $vfoxVersion --exact --accept-source-agreements --accept-package-agreements
+    if ($LASTEXITCODE -ne 0) { throw "Failed to install vfox $vfoxVersion." }
+    Write-Host "vfox $vfoxVersion installed." -ForegroundColor Green
 } else {
     Write-Host "vfox is already installed." -ForegroundColor Green
 }
@@ -381,8 +426,13 @@ Show-PipelineInvolvement
 Write-Section "Bootstrap: npm install"
 if (Test-Path "package.json") {
     Write-Host "Found package.json. Running 'npm install'..." -ForegroundColor Yellow
+    Write-Host "  (npm shows its own progress)" -ForegroundColor DarkGray
     npm install
-    Write-Host "npm install completed successfully!" -ForegroundColor Green
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "npm install completed successfully!" -ForegroundColor Green
+    } else {
+        Write-Host "npm install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+    }
 } else {
     Write-Host "No package.json found in $PSScriptRoot. Skipping 'npm install'." -ForegroundColor Yellow
 }
