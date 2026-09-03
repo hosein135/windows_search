@@ -1,27 +1,33 @@
 'use strict';
 
 /**
- * Streaming CSV importer.
+ * Streaming CSV importer (sequential mode: one file at a time, one thread).
  *
  * Scans the databases/ folder, resolves each file's layout from the report
  * schemas, cleans every cell (placeholders -> never stored), and upserts
  * ONE Mongo document per person (keyed by national code, falling back to
  * the source account number). Empty rows are skipped entirely.
  *
+ * Parsing overlaps with writing: up to `inflight` bulkWrites are in the air
+ * while the next batch is parsed (the parallel importer does the same per
+ * worker thread, on every core - see parallelImporter.js).
+ *
  * GPU hook: when the GUI enables "GPU normalize", each batch's text cells
- * (names/addresses) are Persian-folded by a WebGPU compute shader in the
- * renderer before the CPU builds the documents. normalizePersianChars is
- * idempotent, so a GPU-pre-folded cell passes the CPU path unchanged.
+ * (names/addresses) are Persian-folded by WebGPU compute shaders (sharded over
+ * every GPU endpoint the main process knows) before the CPU builds the
+ * documents. normalizePersianChars is idempotent, so a GPU-pre-folded cell
+ * passes the CPU path unchanged.
  */
 
 const fs = require('fs');
 const path = require('path');
 const { parse } = require('csv-parse');
 const { resolveSource } = require('./schemas');
-const { buildPerson, normalizePersianChars } = require('./normalize');
+const { collectFoldCells, applyFoldedCells, rowsToPersons, writePersons } = require('./importerHelpers');
 
 const DEFAULT_BATCH = 5000;
-const GPU_CHUNK = 8192;
+const DEFAULT_INFLIGHT = 2;
+const GPU_CHUNK = 16384;
 
 /** Recursively list *.csv files under dir, newest schema match first. */
 function scanCsvFiles(dir) {
@@ -56,69 +62,26 @@ function scanCsvFiles(dir) {
   return out;
 }
 
-/** Merge person parts b into a (used to dedupe equal keys inside one batch). */
-function mergePerson(a, b) {
-  Object.assign(a.set, b.set);
-  for (const [k, vals] of Object.entries(b.addToSet)) {
-    a.addToSet[k] = [...new Set([...(a.addToSet[k] || []), ...vals])];
+/** Fold the text cells of a batch on the GPU endpoints (best effort). */
+async function gpuFoldBatch(rows, source, gpuFold) {
+  const { strings, refs } = collectFoldCells(rows, source);
+  if (!strings.length) return;
+  for (let i = 0; i < strings.length; i += GPU_CHUNK) {
+    const chunk = strings.slice(i, i + GPU_CHUNK);
+    const folded = await gpuFold(chunk); // -> array of folded strings, or null
+    if (!folded) continue;
+    applyFoldedCells(rows, refs.slice(i * 2, (i + chunk.length) * 2), folded);
   }
-  if (!a.searchName && b.searchName) a.searchName = b.searchName;
-}
-
-/** Text cells that benefit from GPU Persian folding. */
-const GPU_TEXT_TARGETS = new Set([
-  'fullName', 'firstName', 'lastName', 'fatherName',
-  'city', 'province', 'birthCity', 'birthProvince', 'address',
-]);
-
-async function gpuFoldBatch(rows, source, gpuNormalize) {
-  if (!gpuNormalize) return;
-  const cells = [];
-  const refs = [];
-  for (let r = 0; r < rows.length; r++) {
-    const row = rows[r];
-    for (let c = 0; c < row.length && c < source.columns.length; c++) {
-      const target = source.columns[c];
-      if (!target || !GPU_TEXT_TARGETS.has(target)) continue;
-      const v = row[c];
-      if (typeof v === 'string' && v !== '') {
-        refs.push([r, c]);
-        cells.push(v);
-      }
-    }
-  }
-  for (let i = 0; i < cells.length; i += GPU_CHUNK) {
-    const chunk = cells.slice(i, i + GPU_CHUNK);
-    const folded = await gpuNormalize(chunk); // -> array of folded strings
-    for (let j = 0; j < folded.length; j++) {
-      const [r, c] = refs[i + j];
-      if (typeof folded[j] === 'string') rows[r][c] = folded[j];
-    }
-  }
-}
-
-function toUpdateOp(person) {
-  const now = new Date();
-  const $set = { ...person.set, updatedAt: now };
-  if (person.searchName) $set.searchName = person.searchName;
-  const $addToSet = {};
-  for (const [k, vals] of Object.entries(person.addToSet)) {
-    if (vals && vals.length) $addToSet[k] = { $each: vals };
-  }
-  const update = { $set, $setOnInsert: { key: person.key, createdAt: now } };
-  if (Object.keys($addToSet).length) update.$addToSet = $addToSet;
-  return {
-    updateOne: { filter: { key: person.key }, update, upsert: true },
-  };
 }
 
 /**
  * Import one CSV file.
- * opts: { col, batchSize, onProgress, signal, gpuNormalize }
+ * opts: { col, batchSize, inflight, onProgress, signal, gpuFold (alias gpuNormalize) }
  * Progress events: { phase, file, rows, persons, skipped, bytes, bytesTotal, rowsPerSec }
  */
 async function importFile(file, opts) {
-  const { col, batchSize = DEFAULT_BATCH, onProgress, signal, gpuNormalize } = opts;
+  const { col, batchSize = DEFAULT_BATCH, inflight = DEFAULT_INFLIGHT, onProgress, signal } = opts;
+  const gpuFold = opts.gpuFold || opts.gpuNormalize || null;
   const source = resolveSource(file.path || file);
   if (!source) throw new Error(`Unknown CSV layout: ${file.path || file}`);
   const filePath = file.path || file;
@@ -142,47 +105,29 @@ async function importFile(file, opts) {
     });
   };
 
-  const flush = async () => {
+  const flushRows = async (rows) => {
+    if (gpuFold) {
+      try { await gpuFoldBatch(rows, source, gpuFold); }
+      catch { /* GPU fold is best-effort; buildPerson folds on the CPU anyway */ }
+    }
+    const persons = rowsToPersons(rows, source, sourceTag, stats);
+    if (!persons.length) return;
+    stats.persons += await writePersons(col, persons, stats);
+  };
+
+  // Pipelined writes: parsing continues while up to `inflight` batches are
+  // being written. Errors are captured and re-thrown after the loop so a
+  // rejected write never becomes an unhandled rejection.
+  const pending = new Set();
+  let firstError = null;
+  const startFlush = () => {
     if (!batchRows.length) return;
     const rows = batchRows;
     batchRows = [];
-
-    if (gpuNormalize) {
-      try { await gpuFoldBatch(rows, source, gpuNormalize); }
-      catch { /* GPU normalize is best-effort; CPU folding inside buildPerson */ }
-    }
-
-    const byKey = new Map();
-    for (const row of rows) {
-      let person = null;
-      try { person = buildPerson(source, row, sourceTag); }
-      catch { stats.errors++; continue; }
-      if (!person) { stats.skipped++; continue; }
-      const prev = byKey.get(person.key);
-      if (prev) mergePerson(prev, person);
-      else byKey.set(person.key, person);
-    }
-    if (!byKey.size) return;
-
-    const ops = [...byKey.values()].map(toUpdateOp);
-    try {
-      const res = await col.bulkWrite(ops, { ordered: false });
-      // matchedCount covers both modified and matched-but-identical docs.
-      stats.persons += res.upsertedCount + res.matchedCount;
-    } catch (err) {
-      // Duplicate-key races inside a batch are retried one-by-one.
-      if (err && err.writeErrors) {
-        for (const we of err.writeErrors) {
-          const op = ops[we.index];
-          try {
-            await col.updateOne(op.updateOne.filter, op.updateOne.update, { upsert: true });
-            stats.persons++;
-          } catch { stats.errors++; }
-        }
-      } else {
-        throw err;
-      }
-    }
+    const p = flushRows(rows)
+      .catch((err) => { if (!firstError) firstError = err; })
+      .finally(() => pending.delete(p));
+    pending.add(p);
   };
 
   const parser = fs.createReadStream(filePath)
@@ -197,7 +142,7 @@ async function importFile(file, opts) {
   emit('start');
   try {
     for await (const row of parser) {
-      if (signal && signal.aborted) break;
+      if ((signal && signal.aborted) || firstError) break;
       stats.rows++;
       // Header rows: named ('NATIONAL_CODE' / 'MOBL_NUM_VOICE_V' / ...) or
       // generic ('Field1'). Some irancell files carry two header rows; both
@@ -205,20 +150,23 @@ async function importFile(file, opts) {
       if (stats.rows <= 3 && source.isHeaderRow(row)) { stats.rows--; continue; }
       batchRows.push(row);
       if (batchRows.length >= batchSize) {
-        await flush();
+        startFlush();
         emit('progress');
+        if (pending.size >= inflight) await Promise.race(pending);
       }
     }
   } finally {
-    await flush();
+    startFlush();
+    await Promise.all(pending);
     emit(signal && signal.aborted ? 'cancelled' : 'done');
   }
+  if (firstError) throw firstError;
   return stats;
 }
 
 /**
  * Import every known CSV under dir sequentially.
- * opts: { col, onProgress, signal, gpuNormalize, only }
+ * opts: { col, onProgress, signal, gpuFold, only }
  */
 async function importAll(dir, opts) {
   const files = scanCsvFiles(dir).filter((f) => f.known);
@@ -237,4 +185,4 @@ async function importAll(dir, opts) {
   return totals;
 }
 
-module.exports = { scanCsvFiles, importFile, importAll, DEFAULT_BATCH };
+module.exports = { scanCsvFiles, importFile, importAll, DEFAULT_BATCH, DEFAULT_INFLIGHT };

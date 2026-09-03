@@ -48,16 +48,27 @@
       <button id="btn-scan">Scan databases folder</button>
       <label class="gpu-toggle">
         <input type="checkbox" id="chk-gpu-normalize" checked />
-        Use GPU for Persian text normalization (WebGPU, falls back to CPU)
+        GPU text normalization (WebGPU)
+      </label>
+      <label class="gpu-toggle" title="One worker thread per logical CPU; big files are split into byte-range chunks so every core works on them; each worker writes to MongoDB directly.">
+        <input type="checkbox" id="chk-parallel" checked />
+        Parallel import (all CPU cores, chunked files)
+      </label>
+      <label class="gpu-toggle" id="workers-label">
+        Workers: <input type="number" id="workers-count" value="4" min="1" max="128" style="width:56px" />
+      </label>
+      <label class="gpu-toggle" id="inflight-label" title="Concurrent bulkWrites per worker (parse overlaps with writing).">
+        In-flight writes: <input type="number" id="inflight-count" value="2" min="1" max="8" style="width:48px" />
       </label>
       <button id="btn-import" class="primary" disabled>Import selected files</button>
       <button id="btn-cancel" disabled>Cancel</button>
     </div>
     <div id="import-summary" class="muted">Scans <code>databases\</code> recursively for the known CSV layouts. Each file has its own Import button for file-by-file mode.</div>
+    <div id="import-plan" class="muted"></div>
     <div class="progress-outer"><div id="import-bar" class="progress-inner"></div></div>
     <table class="results">
       <thead>
-        <tr><th>Select</th><th>Import</th><th>File</th><th>Layout</th><th>Size</th><th>Rows</th><th>Persons</th><th>Skipped</th><th>Rows/s</th><th>State</th></tr>
+        <tr><th>Select</th><th>Import</th><th>File</th><th>Layout</th><th>Size</th><th>Rows</th><th>Persons</th><th>Skipped</th><th>Rows/s</th><th>Chunks</th><th>State</th></tr>
       </thead>
       <tbody id="files-body"></tbody>
     </table>
@@ -74,6 +85,8 @@
     <button id="btn-hw-refresh">Re-detect</button>
     <div id="hw-cpu" class="hw-block"></div>
     <div id="hw-gpus" class="hw-block"></div>
+    <h3>Compute plan (live: every GPU process + CPU pool this app is using right now)</h3>
+    <div id="hw-compute" class="hw-block"></div>
     <h3>Pipeline involvement (who does what, and why the rest are skipped)</h3>
     <div id="hw-involvement" class="hw-block"></div>
   </section>

@@ -106,3 +106,16 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .inv-card { padding: 8px 10px; border-left: 3px solid var(--accent); background: var(--panel2); margin: 6px 0; border-radius: 0 6px 6px 0; }
 .inv-card b { color: var(--text); }
 .inv-role { float: right; font-size: 11px; color: var(--accent); }
+
+/* compute plan */
+.plan-row { display: grid; grid-template-columns: 170px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px solid #232c37; }
+.plan-row:last-child { border-bottom: none; }
+.plan-k { color: var(--muted); font-size: 12px; text-transform: uppercase; padding-top: 2px; }
+.plan-v small { color: var(--muted); }
+.badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; border: 1px solid #2a3441; margin-right: 6px; vertical-align: middle; }
+.badge-ok { color: var(--ok); border-color: var(--ok); }
+.badge-warn { color: var(--warn); border-color: var(--warn); }
+.badge-muted { color: var(--muted); }
+.badge-nvidia { color: var(--nvidia); border-color: var(--nvidia); }
+.badge-intel { color: var(--intel); border-color: var(--intel); }
+.badge-amd { color: var(--amd); border-color: var(--amd); }

@@ -4,6 +4,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('api', {
   getHardware: (opts) => ipcRenderer.invoke('hardware:get', opts),
+  getGpuPlan: () => ipcRenderer.invoke('gpu:plan'),
+  getGpuFlags: () => ipcRenderer.invoke('gpu:flags'),
   dbStatus: () => ipcRenderer.invoke('db:status'),
   scanFiles: () => ipcRenderer.invoke('files:scan'),
   search: (q) => ipcRenderer.invoke('search:run', q),
@@ -16,16 +18,27 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('import:progress', fn);
     return () => ipcRenderer.removeListener('import:progress', fn);
   },
-  onGpuNormalize: (cb) => {
-    const fn = async (_e, { id, strings }) => {
+  onGpuPlanChange: (cb) => {
+    const fn = (_e, payload) => cb(payload);
+    ipcRenderer.on('gpu:plan:changed', fn);
+    return () => ipcRenderer.removeListener('gpu:plan:changed', fn);
+  },
+  /** Tell the main process which WebGPU adapter this renderer got (pool registration). */
+  reportGpuState: (state) => ipcRenderer.send('gpu:state', state),
+  /**
+   * Serve GPU ops requested by the main process (fold / rank / state).
+   * cb(op, payload) -> Promise<result>
+   */
+  onGpuOp: (cb) => {
+    const fn = async (_e, { id, op, payload }) => {
       try {
-        const out = await cb(strings);
-        ipcRenderer.send('gpu:normalize:result', { id, strings: out });
+        const result = await cb(op, payload);
+        ipcRenderer.send('gpu:op:result', { id, result });
       } catch (err) {
-        ipcRenderer.send('gpu:normalize:result', { id, error: String(err && err.message || err) });
+        ipcRenderer.send('gpu:op:result', { id, error: String(err && err.message || err) });
       }
     };
-    ipcRenderer.on('gpu:normalize', fn);
-    return () => ipcRenderer.removeListener('gpu:normalize', fn);
+    ipcRenderer.on('gpu:op', fn);
+    return () => ipcRenderer.removeListener('gpu:op', fn);
   },
 });

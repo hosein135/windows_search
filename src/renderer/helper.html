@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+  <title>GPU helper</title>
+</head>
+<body>
+  <!-- Hidden window of a GPU helper process: runs the same WebGPU kernels as
+       the main window on the adapter this process was pinned to. -->
+  <script src="gpuRank.js"></script>
+  <script src="helper.js"></script>
+</body>
+</html>

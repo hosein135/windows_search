@@ -8,6 +8,9 @@ const fs = require('fs');
 const DEFAULT_URL = process.env.MONGO_URL || 'mongodb://127.0.0.1:27017';
 const DB_NAME = process.env.MONGO_DB || 'windows_search';
 const PERSONS_COLLECTION = 'persons';
+// The main-process pool serves searches + the sequential importer's in-flight
+// writes; parallel-import workers open their own per-thread connections.
+const POOL_SIZE = Math.max(4, Number(process.env.MONGO_POOL_SIZE) || 16);
 
 let client = null;
 let db = null;
@@ -15,7 +18,7 @@ let db = null;
 async function connect(url = DEFAULT_URL) {
   if (db) return db;
   client = new MongoClient(url, {
-    maxPoolSize: 8,
+    maxPoolSize: POOL_SIZE,
     serverSelectionTimeoutMS: 5000,
   });
   await client.connect();
