@@ -104,8 +104,9 @@ function Add-VfoxSdkToMachinePath {
 
 function Invoke-Vfox {
     <# Wrapper that relaxes $ErrorActionPreference around vfox calls so stderr
-       progress output doesn't throw under 'Stop'. Returns $LASTEXITCODE. #>
-    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Args)
+       progress output doesn't throw under 'Stop'. Returns $LASTEXITCODE.
+       NOTE: no 2>&1 redirect — stderr goes straight to the console. #>
+    param([Parameter(ValueFromRemainingArguments = $true)][string[]]$VfoxArgs)
     $prevEAP = $ErrorActionPreference
     $prevNative = $null
     if (Get-Variable -Name PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
@@ -113,7 +114,11 @@ function Invoke-Vfox {
         $PSNativeCommandUseErrorActionPreference = $false
     }
     $ErrorActionPreference = 'Continue'
-    & vfox @Args 2>&1 | Out-Host
+    # Do NOT use 2>&1 here — it makes PowerShell treat vfox's stderr progress
+    # bar as error records. Let stderr flow to the console directly.
+    $exe = (Get-Command vfox -ErrorAction SilentlyContinue).Source
+    if (-not $exe) { $exe = 'vfox' }
+    & $exe @VfoxArgs
     $code = $LASTEXITCODE
     $ErrorActionPreference = $prevEAP
     if ($null -ne $prevNative) { $PSNativeCommandUseErrorActionPreference = $prevNative }
@@ -157,8 +162,12 @@ function Download-File {
     # Prefer curl.exe (Windows 10+) — shows a clean progress bar with speed
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
     if ($curl) {
-        & curl.exe -L -# -o "$Destination" "$Url" 2>&1 | Out-Host
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $Destination)) {
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & curl.exe -L -# -o "$Destination" "$Url"
+        $curlExit = $LASTEXITCODE
+        $ErrorActionPreference = $prevEAP
+        if ($curlExit -eq 0 -and (Test-Path $Destination)) {
             $sizeMB = [math]::Round((Get-Item $Destination).Length / 1MB, 1)
             Write-Host "  Done ($sizeMB MB)" -ForegroundColor Green
             return $true
