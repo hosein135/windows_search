@@ -3,7 +3,6 @@
 /** MongoDB connection + collection/index management. */
 
 const { MongoClient } = require('mongodb');
-const fs = require('fs');
 
 const DEFAULT_URL = process.env.MONGO_URL || 'mongodb://127.0.0.1:27017';
 const DB_NAME = process.env.MONGO_DB || 'windows_search';
@@ -14,22 +13,63 @@ const POOL_SIZE = Math.max(4, Number(process.env.MONGO_POOL_SIZE) || 16);
 
 let client = null;
 let db = null;
+/** In-flight connect promise so concurrent callers (startup + status chip) share one attempt. */
+let connecting = null;
+
+function clientOptions() {
+  return {
+    maxPoolSize: POOL_SIZE,
+    serverSelectionTimeoutMS: 8000,
+    connectTimeoutMS: 8000,
+    // Standalone mongod from setup.ps1 is not a replica set; without this the
+    // driver can fail server selection even when the port is accepting.
+    directConnection: true,
+    // Prefer IPv4 — avoids ::1 vs 127.0.0.1 mismatches on Windows.
+    family: 4,
+  };
+}
+
+async function resetClient() {
+  const c = client;
+  client = null;
+  db = null;
+  if (c) {
+    try { await c.close(); } catch { /* ignore */ }
+  }
+}
 
 async function connect(url = DEFAULT_URL) {
-  if (db) return db;
-  client = new MongoClient(url, {
-    maxPoolSize: POOL_SIZE,
-    serverSelectionTimeoutMS: 5000,
-  });
-  await client.connect();
-  db = client.db(DB_NAME);
-  return db;
+  if (db && client) return db;
+  if (connecting) return connecting;
+
+  connecting = (async () => {
+    await resetClient();
+    const c = new MongoClient(url, clientOptions());
+    try {
+      await c.connect();
+      client = c;
+      db = c.db(DB_NAME);
+      return db;
+    } catch (err) {
+      try { await c.close(); } catch { /* ignore */ }
+      if (client === c) {
+        client = null;
+        db = null;
+      }
+      throw err;
+    }
+  })();
+
+  try {
+    return await connecting;
+  } finally {
+    connecting = null;
+  }
 }
 
 async function close() {
-  if (client) await client.close();
-  client = null;
-  db = null;
+  connecting = null;
+  await resetClient();
 }
 
 function persons() {
@@ -59,15 +99,24 @@ async function ensureIndexes() {
   await col.createIndex({ searchName: 1 }, { name: 'search_name', sparse: true });
 }
 
-/** Ping helper for the GUI status bar. */
+async function probe() {
+  const d = await connect();
+  await d.command({ ping: 1 });
+  const count = await persons().estimatedDocumentCount();
+  return { ok: true, url: DEFAULT_URL, db: DB_NAME, persons: count };
+}
+
+/** Ping helper for the GUI status bar. Retries once after resetting a stale client. */
 async function status() {
   try {
-    const d = await connect();
-    await d.command({ ping: 1 });
-    const count = await persons().estimatedDocumentCount();
-    return { ok: true, url: DEFAULT_URL, db: DB_NAME, persons: count };
-  } catch (err) {
-    return { ok: false, url: DEFAULT_URL, db: DB_NAME, error: err.message, persons: 0 };
+    return await probe();
+  } catch (first) {
+    await resetClient().catch(() => {});
+    try {
+      return await probe();
+    } catch (err) {
+      return { ok: false, url: DEFAULT_URL, db: DB_NAME, error: err.message, persons: 0 };
+    }
   }
 }
 

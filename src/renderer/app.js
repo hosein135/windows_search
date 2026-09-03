@@ -137,10 +137,11 @@
     if (st.ok) {
       chip.textContent = `MongoDB: ${st.persons.toLocaleString()} persons`;
       chip.className = 'chip chip-ok';
+      chip.title = `${st.url || ''} / ${st.db || ''}`;
     } else {
       chip.textContent = 'MongoDB: offline';
       chip.className = 'chip chip-bad';
-      chip.title = st.error || '';
+      chip.title = st.error || 'Cannot reach mongod';
     }
   }
 

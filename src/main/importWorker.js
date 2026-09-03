@@ -56,6 +56,9 @@ async function getCollection() {
   client = new MongoClient(cfg.mongoUrl, {
     maxPoolSize: Math.max(2, cfg.inflight + 1),
     serverSelectionTimeoutMS: 10_000,
+    connectTimeoutMS: 10_000,
+    directConnection: true,
+    family: 4,
   });
   await client.connect();
   col = client.db(cfg.dbName).collection(cfg.collection);
