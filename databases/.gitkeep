@@ -1,0 +1,6 @@
+Drop the database dump folders here, e.g.:
+  databases\bank mellat\Bank Mellat DB1.csv
+  databases\bank melli\Bank Melli DB1.csv
+  databases\bank saderat\Bank Saderat DB1.csv
+  databases\irancell\935-1.csv
+The importer scans this folder recursively for *.csv files.

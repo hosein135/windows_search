@@ -1,0 +1,21 @@
+{
+  "name": "windows-search",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Demo Windows GUI search app: Node.js + Electron GUI, MongoDB storage, GPU-accelerated ranking via WebGPU (CPU fallback)",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "import": "node scripts/import-cli.js",
+    "make-sample": "node scripts/make-sample-data.js",
+    "smoke": "node scripts/smoke-test.js",
+    "hardware": "node scripts/hardware-cli.js"
+  },
+  "dependencies": {
+    "csv-parse": "^5.6.0",
+    "mongodb": "^6.10.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0"
+  }
+}
