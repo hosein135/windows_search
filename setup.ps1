@@ -142,47 +142,6 @@ function Install-VfoxSdk {
     return $true
 }
 
-function Install-MongoFallback {
-    <#
-        Fallback when the vfox mongod plugin can't reach GitHub (e.g. CloudFront
-        403 country blocks). Downloads the portable MongoDB zip directly from
-        fastdl.mongodb.org (MongoDB's own CDN, not behind CloudFront) and
-        extracts it into the vfox SDK directory so Add-VfoxSdkToMachinePath
-        still finds it.
-    #>
-    param([Parameter(Mandatory = $true)][string]$Version)
-
-    $sdkDir = "$HOME\.version-fox\sdks\mongod\bin"
-    if (Test-Path "$sdkDir\mongod.exe") { return $true }
-
-    $url = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${Version}.zip"
-    $zip = "$env:TEMP\mongodb-${Version}.zip"
-    $extractRoot = "$HOME\.version-fox\sdks\mongod"
-
-    Write-Host "  vfox plugin blocked. Downloading MongoDB $Version directly from $url..." -ForegroundColor Yellow
-    curl.exe -sS -o $zip $url
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zip)) {
-        Write-Host "  Direct download failed." -ForegroundColor Red
-        return $false
-    }
-
-    Write-Host "  Extracting..." -ForegroundColor Yellow
-    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
-    Expand-Archive -Path $zip -DestinationPath $extractRoot -Force
-
-    # The zip extracts to mongodb-win32-x86_64-windows-X.Y.Z\bin\mongod.exe
-    # Move it to the expected $sdkDir\bin layout.
-    $nested = Get-ChildItem -Path $extractRoot -Directory | Where-Object { $_.Name -like "mongodb-win32*" } | Select-Object -First 1
-    if ($nested -and (Test-Path "$($nested.FullName)\bin\mongod.exe")) {
-        # Copy bin contents into the expected location
-        New-Item -ItemType Directory -Force -Path $sdkDir | Out-Null
-        Copy-Item -Path "$($nested.FullName)\bin\*" -Destination $sdkDir -Recurse -Force
-    }
-
-    Remove-Item $zip -Force -ErrorAction SilentlyContinue
-    return (Test-Path "$sdkDir\mongod.exe")
-}
-
 function Show-HostHardwareInventory {
     Write-Section "Host hardware inventory (Windows)"
 
@@ -354,24 +313,19 @@ Add-VfoxSdkToMachinePath -ExeName "node.exe"
 
 ## 6. INSTALL AND APPLY MONGODB $mongoTargetVersion LOCALLY & GLOBALLY (via vfox)
 Write-Section "Bootstrap: MongoDB (vfox)"
-Write-Host "Adding mongod plugin to vfox..." -ForegroundColor Yellow
-Invoke-Vfox add mongod | Out-Null
+Write-Host "Adding mongo plugin to vfox..." -ForegroundColor Yellow
+# Uses the 'mongo' plugin (yeshan333/vfox-mongo), NOT 'mongod' (echocat/vfox-mongod).
+# The 'mongo' plugin resolves versions via jsdelivr CDN (not GitHub API), so it
+# works in regions where GitHub/CloudFront returns 403. It also auto-installs mongosh.
+Invoke-Vfox add mongo | Out-Null
 
 Write-Host "Installing MongoDB version $mongoTargetVersion..." -ForegroundColor Yellow
-$mongoInstalled = Install-VfoxSdk -Plugin "mongod" -Version $mongoTargetVersion
-
-# Fallback: if vfox can't reach GitHub (CloudFront 403 country block),
-# download MongoDB directly from fastdl.mongodb.org (MongoDB's own CDN).
-if (-not $mongoInstalled) {
-    Write-Host "  vfox install failed (likely GitHub/CloudFront 403). Trying direct download..." -ForegroundColor Yellow
-    $mongoInstalled = Install-MongoFallback -Version $mongoTargetVersion
-}
+$mongoInstalled = Install-VfoxSdk -Plugin "mongo" -Version $mongoTargetVersion
 
 if ($mongoInstalled) {
     Write-Host "Activating MongoDB $mongoTargetVersion globally and for the current session..." -ForegroundColor Yellow
-    # vfox use may also fail if the plugin can't reach GitHub; ignore errors.
-    try { Invoke-Vfox use -g "mongod@$mongoTargetVersion" | Out-Null } catch {}
-    try { Invoke-Vfox use -p "mongod@$mongoTargetVersion" | Out-Null } catch {}
+    Invoke-Vfox use -g "mongo@$mongoTargetVersion" | Out-Null
+    Invoke-Vfox use -p "mongo@$mongoTargetVersion" | Out-Null
     if (Get-Command vfox -ErrorAction SilentlyContinue) {
         Invoke-Expression "$(vfox activate pwsh)"
     }

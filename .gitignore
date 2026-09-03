@@ -1,4 +1,5 @@
 node_modules/
 .tmp-mongo/
+.vfox/
 data/
 *.log
