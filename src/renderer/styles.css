@@ -75,6 +75,8 @@ table.results {
 .results td[dir="auto"] { font-size: 14px; }
 .hit { color: #ffd166; font-weight: 600; }
 tr:hover td { background: #1b232c; }
+tr.file-imported td { color: var(--muted); }
+tr.file-imported .c-state { color: var(--ok); font-weight: 600; }
 
 .import-controls { display: flex; gap: 12px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 button {

@@ -106,6 +106,8 @@ async function ensureIndexes() {
   await col.createIndex({ cards: 1 }, { name: 'cards', sparse: true });
   await col.createIndex({ accounts: 1 }, { name: 'accounts', sparse: true });
   await col.createIndex({ searchName: 1 }, { name: 'search_name', sparse: true });
+  // Used by the Import tab to mark CSVs already present in the DB (sources tags).
+  await col.createIndex({ sources: 1 }, { name: 'sources', sparse: true });
 }
 
 async function probe() {
@@ -129,4 +131,38 @@ async function status() {
   }
 }
 
-module.exports = { connect, close, persons, rawDb, ensureIndexes, status, DEFAULT_URL, DB_NAME, PERSONS_COLLECTION };
+/**
+ * Map of import source tags -> person counts.
+ * Tags are written as `${sourceId}:${basename}` on each person (see normalize.buildPerson).
+ * Returns {} when mongod is unreachable.
+ */
+async function importedSourceStats() {
+  try {
+    await connect();
+    const rows = await persons().aggregate([
+      { $match: { sources: { $exists: true, $ne: [] } } },
+      { $unwind: '$sources' },
+      { $group: { _id: '$sources', persons: { $sum: 1 } } },
+    ], { allowDiskUse: true }).toArray();
+    const byTag = {};
+    const byFile = {}; // basename -> { persons, tags: [] } (fallback if layout id differs)
+    for (const r of rows) {
+      const tag = r._id;
+      if (typeof tag !== 'string' || !tag) continue;
+      byTag[tag] = r.persons;
+      const colon = tag.indexOf(':');
+      const fileName = colon >= 0 ? tag.slice(colon + 1) : tag;
+      if (!byFile[fileName]) byFile[fileName] = { persons: 0, tags: [] };
+      byFile[fileName].persons += r.persons;
+      byFile[fileName].tags.push(tag);
+    }
+    return { ok: true, byTag, byFile };
+  } catch (err) {
+    return { ok: false, error: err.message, byTag: {}, byFile: {} };
+  }
+}
+
+module.exports = {
+  connect, close, persons, rawDb, ensureIndexes, status, importedSourceStats,
+  DEFAULT_URL, DB_NAME, PERSONS_COLLECTION,
+};

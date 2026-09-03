@@ -91,7 +91,26 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
 
   ipcMain.handle('db:status', async () => db.status());
 
-  ipcMain.handle('files:scan', async () => scanCsvFiles(databasesDir));
+  ipcMain.handle('files:scan', async () => {
+    const files = scanCsvFiles(databasesDir);
+    const imported = await db.importedSourceStats();
+    return files.map((f) => {
+      if (!f.known) {
+        return { ...f, imported: false, importedPersons: 0, importTag: null };
+      }
+      const tag = `${f.source}:${f.name}`;
+      let persons = imported.byTag[tag];
+      // Basename fallback when an older tag shape is present
+      if (persons == null && imported.byFile[f.name]) persons = imported.byFile[f.name].persons;
+      const n = persons || 0;
+      return {
+        ...f,
+        imported: n > 0,
+        importedPersons: n,
+        importTag: tag,
+      };
+    });
+  });
 
   ipcMain.handle('search:run', async (_e, raw) => {
     try {

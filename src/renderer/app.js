@@ -263,20 +263,35 @@
   async function scanFiles() {
     filesCache = await window.api.scanFiles();
     const known = filesCache.filter((f) => f.known);
+    const already = known.filter((f) => f.imported);
     $('#import-summary').innerHTML =
-      `${filesCache.length} CSV file(s) found, ${known.length} with a known layout - ` +
-      `${fmtSize(filesCache.reduce((a, f) => a + f.sizeBytes, 0))} total.` +
-      (known.length ? ' Use each file\'s Import button for file-by-file mode, or Import selected files for batch.' : '');
-    $('#files-body').innerHTML = filesCache.map((f, i) => `
-      <tr data-path="${esc(f.path)}">
-        <td><input type="checkbox" class="file-chk" data-i="${i}" ${f.known ? 'checked' : 'disabled'} /></td>
-        <td><button class="btn-import-one" data-i="${i}" ${f.known ? '' : 'disabled'}>Import</button></td>
+      `${filesCache.length} CSV file(s) found, ${known.length} with a known layout` +
+      (already.length
+        ? `, <b>${already.length} already in MongoDB</b> (${already.reduce((a, f) => a + f.importedPersons, 0).toLocaleString()} person refs)`
+        : '') +
+      ` - ${fmtSize(filesCache.reduce((a, f) => a + f.sizeBytes, 0))} total.` +
+      (known.length ? ' Use each file\'s Import button for file-by-file mode, or Import selected files for batch. Re-import upserts (safe).' : '');
+    $('#files-body').innerHTML = filesCache.map((f, i) => {
+      const state = !f.known
+        ? 'skipped'
+        : f.imported
+          ? `imported (${f.importedPersons.toLocaleString()} persons)`
+          : 'pending';
+      const stateClass = f.imported ? 'chip-ok' : '';
+      return `
+      <tr data-path="${esc(f.path)}" class="${f.imported ? 'file-imported' : ''}">
+        <td><input type="checkbox" class="file-chk" data-i="${i}" ${f.known && !f.imported ? 'checked' : ''} ${f.known ? '' : 'disabled'} /></td>
+        <td><button class="btn-import-one" data-i="${i}" ${f.known ? '' : 'disabled'}>${f.imported ? 'Re-import' : 'Import'}</button></td>
         <td>${esc(f.folder)} / ${esc(f.name)}</td>
         <td>${esc(f.sourceLabel)}</td>
         <td>${fmtSize(f.sizeBytes)}</td>
-        <td class="c-rows">-</td><td class="c-persons">-</td><td class="c-skipped">-</td>
-        <td class="c-rate">-</td><td class="c-chunks">-</td><td class="c-state">pending</td>
-      </tr>`).join('');
+        <td class="c-rows">-</td>
+        <td class="c-persons">${f.imported ? f.importedPersons.toLocaleString() : '-'}</td>
+        <td class="c-skipped">-</td>
+        <td class="c-rate">-</td><td class="c-chunks">-</td>
+        <td class="c-state ${stateClass}">${state}</td>
+      </tr>`;
+    }).join('');
     $('#btn-import').disabled = !known.length;
 
     // Wire per-file import buttons
@@ -332,6 +347,7 @@
     refreshStatus();
     refreshStorage();
     renderComputePlan().catch(() => {});
+    await scanFiles(); // refresh imported / pending State from MongoDB
   });
 
   for (const id of ['#chk-parallel', '#workers-count', '#inflight-count', '#chk-gpu-normalize']) {
@@ -362,12 +378,6 @@
       if (row) row.querySelector('.c-state').textContent = `error: ${res.error}`;
     } else {
       const s = res.stats;
-      if (row) {
-        row.querySelector('.c-rows').textContent = s.rows.toLocaleString();
-        row.querySelector('.c-persons').textContent = s.persons.toLocaleString();
-        row.querySelector('.c-skipped').textContent = s.skipped.toLocaleString();
-        row.querySelector('.c-state').textContent = res.cancelled ? 'cancelled' : 'done';
-      }
       $('#import-summary').textContent =
         `${f.name}: ${s.persons.toLocaleString()} persons from ${s.rows.toLocaleString()} rows ` +
         `(${s.skipped.toLocaleString()} skipped, ${s.errors.toLocaleString()} errors)` +
@@ -375,6 +385,7 @@
     }
     refreshStatus();
     refreshStorage();
+    await scanFiles(); // mark this file as imported in State
   }
 
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
