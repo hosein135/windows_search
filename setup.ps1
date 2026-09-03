@@ -57,26 +57,34 @@ function Refresh-SessionPath {
 function Add-VfoxSdkToMachinePath {
     param([Parameter(Mandatory = $true)][string]$ExeName)
 
-    # Search both vfox SDK roots (vfox < 1.0 uses ~/.vfox, vfox >= 1.0 uses ~/.version-fox)
-    $exe = $null
-    foreach ($root in @("$HOME\.vfox\sdks", "$HOME\.version-fox\sdks")) {
-        if (Test-Path $root) {
-            $exe = Get-ChildItem -Path $root -Recurse -Filter $ExeName -ErrorAction SilentlyContinue |
-                Select-Object -First 1
-            if ($exe) { break }
-        }
-    }
-    if (-not $exe) {
-        Write-Host "  WARNING: $ExeName not found in vfox SDK directories." -ForegroundColor Yellow
-        return $false
+    # Primary method: after `vfox use -g` + `vfox activate`, the exe is on the
+    # session PATH. Use Get-Command to find its real location.
+    $cmd = Get-Command $ExeName -ErrorAction SilentlyContinue
+    $binDir = $null
+
+    if ($cmd -and $cmd.Source) {
+        $binDir = Split-Path $cmd.Source -Parent
     }
 
-    $binDir = $exe.DirectoryName
+    # Fallback: search both vfox SDK roots (vfox < 1.0 uses ~/.vfox, vfox >= 1.0 uses ~/.version-fox)
+    if (-not $binDir) {
+        foreach ($root in @("$HOME\.vfox\sdks", "$HOME\.version-fox\sdks")) {
+            if (Test-Path $root) {
+                $exe = Get-ChildItem -Path $root -Recurse -Filter $ExeName -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                if ($exe) { $binDir = $exe.DirectoryName; break }
+            }
+        }
+    }
+
+    if (-not $binDir) {
+        Write-Host "  WARNING: $ExeName not found on PATH or in vfox SDK directories." -ForegroundColor Yellow
+        return $false
+    }
 
     # Check if already in Machine PATH (persists for all future terminals)
     $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
     if ($machinePath -like "*$binDir*") {
-        # Already permanent; just make sure current session has it
         if ($env:Path -notlike "*$binDir*") { $env:Path = "$binDir;$env:Path" }
         return $true
     }
@@ -92,6 +100,68 @@ function Add-VfoxSdkToMachinePath {
 
     Write-Host "  Added $binDir to system PATH (permanent)" -ForegroundColor Green
     return $true
+}
+
+function Install-VfoxSdk {
+    param(
+        [Parameter(Mandatory = $true)][string]$Plugin,
+        [Parameter(Mandatory = $true)][string]$Version
+    )
+    # vfox install returns non-zero when the version is already installed;
+    # treat that as success, not failure.
+    vfox install "${Plugin}@${Version}" 2>&1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        # Check if it's already installed (not a real failure)
+        $list = vfox list $Plugin 2>&1
+        if ($list -match [regex]::Escape($Version)) {
+            Write-Host "  $Plugin@$Version is already installed." -ForegroundColor Green
+            return $true
+        }
+        Write-Host "  vfox install $Plugin@$Version failed (exit $LASTEXITCODE)." -ForegroundColor Yellow
+        return $false
+    }
+    return $true
+}
+
+function Install-MongoFallback {
+    <#
+        Fallback when the vfox mongod plugin can't reach GitHub (e.g. CloudFront
+        403 country blocks). Downloads the portable MongoDB zip directly from
+        fastdl.mongodb.org (MongoDB's own CDN, not behind CloudFront) and
+        extracts it into the vfox SDK directory so Add-VfoxSdkToMachinePath
+        still finds it.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Version)
+
+    $sdkDir = "$HOME\.version-fox\sdks\mongod\bin"
+    if (Test-Path "$sdkDir\mongod.exe") { return $true }
+
+    $url = "https://fastdl.mongodb.org/windows/mongodb-windows-x86_64-${Version}.zip"
+    $zip = "$env:TEMP\mongodb-${Version}.zip"
+    $extractRoot = "$HOME\.version-fox\sdks\mongod"
+
+    Write-Host "  vfox plugin blocked. Downloading MongoDB $Version directly from $url..." -ForegroundColor Yellow
+    curl.exe -sS -o $zip $url
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $zip)) {
+        Write-Host "  Direct download failed." -ForegroundColor Red
+        return $false
+    }
+
+    Write-Host "  Extracting..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path $extractRoot | Out-Null
+    Expand-Archive -Path $zip -DestinationPath $extractRoot -Force
+
+    # The zip extracts to mongodb-win32-x86_64-windows-X.Y.Z\bin\mongod.exe
+    # Move it to the expected $sdkDir\bin layout.
+    $nested = Get-ChildItem -Path $extractRoot -Directory | Where-Object { $_.Name -like "mongodb-win32*" } | Select-Object -First 1
+    if ($nested -and (Test-Path "$($nested.FullName)\bin\mongod.exe")) {
+        # Copy bin contents into the expected location
+        New-Item -ItemType Directory -Force -Path $sdkDir | Out-Null
+        Copy-Item -Path "$($nested.FullName)\bin\*" -Destination $sdkDir -Recurse -Force
+    }
+
+    Remove-Item $zip -Force -ErrorAction SilentlyContinue
+    return (Test-Path "$sdkDir\mongod.exe")
 }
 
 function Show-HostHardwareInventory {
@@ -246,14 +316,19 @@ if (Get-Command vfox -ErrorAction SilentlyContinue) {
 
 ## 5. INSTALL AND APPLY NODE.JS $nodeTargetVersion LOCALLY & GLOBALLY
 Write-Host "Adding Node.js plugin to vfox..." -ForegroundColor Yellow
-vfox add nodejs
+vfox add nodejs 2>&1 | Out-Null
 
 Write-Host "Installing Node.js version $nodeTargetVersion..." -ForegroundColor Yellow
-vfox install "nodejs@$nodeTargetVersion"
+Install-VfoxSdk -Plugin "nodejs" -Version $nodeTargetVersion | Out-Null
 
 Write-Host "Activating Node.js $nodeTargetVersion globally and for the current session..." -ForegroundColor Yellow
 vfox use -g "nodejs@$nodeTargetVersion"
 vfox use -p "nodejs@$nodeTargetVersion"
+
+# Activate so Get-Command can find node.exe in this session
+if (Get-Command vfox -ErrorAction SilentlyContinue) {
+    Invoke-Expression "$(vfox activate pwsh)"
+}
 
 # Ensure node and npm are permanently on the system PATH for all future terminals
 Add-VfoxSdkToMachinePath -ExeName "node.exe"
@@ -261,14 +336,27 @@ Add-VfoxSdkToMachinePath -ExeName "node.exe"
 ## 6. INSTALL AND APPLY MONGODB $mongoTargetVersion LOCALLY & GLOBALLY (via vfox)
 Write-Section "Bootstrap: MongoDB (vfox)"
 Write-Host "Adding mongod plugin to vfox..." -ForegroundColor Yellow
-vfox add mongod
+vfox add mongod 2>&1 | Out-Null
 
 Write-Host "Installing MongoDB version $mongoTargetVersion..." -ForegroundColor Yellow
-vfox install "mongod@$mongoTargetVersion" -y
+$mongoInstalled = Install-VfoxSdk -Plugin "mongod" -Version $mongoTargetVersion
 
-Write-Host "Activating MongoDB $mongoTargetVersion globally and for the current session..." -ForegroundColor Yellow
-vfox use -g "mongod@$mongoTargetVersion"
-vfox use -p "mongod@$mongoTargetVersion"
+# Fallback: if vfox can't reach GitHub (CloudFront 403 country block),
+# download MongoDB directly from fastdl.mongodb.org (MongoDB's own CDN).
+if (-not $mongoInstalled) {
+    Write-Host "  vfox install failed (likely GitHub/CloudFront 403). Trying direct download..." -ForegroundColor Yellow
+    $mongoInstalled = Install-MongoFallback -Version $mongoTargetVersion
+}
+
+if ($mongoInstalled) {
+    Write-Host "Activating MongoDB $mongoTargetVersion globally and for the current session..." -ForegroundColor Yellow
+    # vfox use may also fail if the plugin can't reach GitHub; ignore errors.
+    try { vfox use -g "mongod@$mongoTargetVersion" 2>&1 | Out-Null } catch {}
+    try { vfox use -p "mongod@$mongoTargetVersion" 2>&1 | Out-Null } catch {}
+    if (Get-Command vfox -ErrorAction SilentlyContinue) {
+        Invoke-Expression "$(vfox activate pwsh)"
+    }
+}
 
 # Ensure mongod is permanently on the system PATH for all future terminals
 Add-VfoxSdkToMachinePath -ExeName "mongod.exe"
