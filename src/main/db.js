@@ -3,6 +3,7 @@
 /** MongoDB connection + collection/index management. */
 
 const { MongoClient } = require('mongodb');
+const { ensureMongod } = require('./mongoServer');
 
 const DEFAULT_URL = process.env.MONGO_URL || 'mongodb://127.0.0.1:27017';
 const DB_NAME = process.env.MONGO_DB || 'windows_search';
@@ -44,6 +45,14 @@ async function connect(url = DEFAULT_URL) {
 
   connecting = (async () => {
     await resetClient();
+    try {
+      const started = await ensureMongod();
+      if (started && !started.alreadyRunning) {
+        console.log('[mongo] mongod is listening on 127.0.0.1:27017, dbpath:', started.dataDir);
+      }
+    } catch (err) {
+      console.warn('[mongo] ensure mongod:', err.message);
+    }
     const c = new MongoClient(url, clientOptions());
     try {
       await c.connect();
