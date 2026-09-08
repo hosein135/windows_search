@@ -188,45 +188,36 @@
 
   function refreshDatabaseSelector() {
     const prev = dbSelect.value;
-    const byId = new Map();
-
-    // Built only from the local scan cache (no extra Mongo round-trip)
-    for (const f of filesCache) {
-      if (!f.known || !f.source) continue;
-      const cur = byId.get(f.source) || {
-        id: f.source,
-        label: f.sourceLabel || f.source,
-        persons: 0,
-        imported: false,
-        pending: !!f.statusPending,
-      };
-      if (f.sourceLabel) cur.label = f.sourceLabel;
-      if (f.statusPending) cur.pending = true;
-      if (f.imported) {
-        cur.imported = true;
-        if (f.importedPersons) cur.persons += f.importedPersons;
-      }
-      byId.set(f.source, cur);
-    }
-
-    const dbs = [...byId.values()].sort((a, b) => a.label.localeCompare(b.label));
     const options = ['<option value="">All databases</option>'];
-    if (!dbs.length) {
+
+    // Same files as the Import tab — only rows marked imported are selectable
+    const known = filesCache.filter((f) => f.known);
+    const imported = known.filter((f) => f.imported);
+    const checking = known.some((f) => f.statusPending);
+
+    if (!known.length) {
       options.push('<option value="" disabled>(no databases found under databases\\)</option>');
+    } else if (!imported.length && checking) {
+      options.push('<option value="" disabled>(checking import status…)</option>');
+    } else if (!imported.length) {
+      options.push('<option value="" disabled>(no imported databases yet — use the Import tab)</option>');
     } else {
-      for (const d of dbs) {
-        if (d.pending && !d.imported) {
-          options.push(`<option value="${esc(d.id)}" disabled>${esc(d.label)} (checking…)</option>`);
-        } else if (d.imported) {
-          const count = d.persons ? ` (${d.persons.toLocaleString()})` : '';
-          options.push(`<option value="${esc(d.id)}">${esc(d.label)}${count}</option>`);
-        } else {
-          options.push(`<option value="${esc(d.id)}" disabled>${esc(d.label)} (not imported)</option>`);
-        }
+      // Group by layout label, list each imported CSV like Import tab ("folder / name")
+      const sorted = imported.slice().sort((a, b) => {
+        const la = `${a.sourceLabel || a.folder} / ${a.name}`;
+        const lb = `${b.sourceLabel || b.folder} / ${b.name}`;
+        return la.localeCompare(lb);
+      });
+      for (const f of sorted) {
+        const tag = f.importTag || `${f.source}:${f.name}`;
+        const label = `${f.folder} / ${f.name}`;
+        const count = f.importedPersons != null ? ` (${f.importedPersons.toLocaleString()})` : '';
+        options.push(`<option value="${esc(tag)}">${esc(label)}${count}</option>`);
       }
     }
+
     dbSelect.innerHTML = options.join('');
-    if (prev && dbs.some((d) => d.id === prev && d.imported)) dbSelect.value = prev;
+    if (prev && [...dbSelect.options].some((o) => o.value === prev)) dbSelect.value = prev;
   }
 
   async function runSearch() {
@@ -255,7 +246,7 @@
       ? ` across ${ranked.shards.length} shards (${ranked.shards.map((s) => `${s.unit}:${s.docs}`).join(', ')})`
       : '';
     const scope = sourceId
-      ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.split(' (')[0]}`
+      ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.replace(/\s*\([\d,]+\)$/, '')}`
       : '';
     $('#search-meta').textContent =
       `${res.candidates.length} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +

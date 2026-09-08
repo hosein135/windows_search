@@ -64,14 +64,19 @@ function buildFilter(query) {
   }
 }
 
-/** Restrict candidates to persons tagged with a given import source id (prefix of sources tags). */
-function withSourceFilter(filter, sourceId) {
-  const id = String(sourceId || '').trim();
-  if (!id || !filter) return filter;
+/** Restrict candidates to one imported CSV (full tag) or a source layout (id prefix). */
+function withSourceFilter(filter, sourceKey) {
+  const key = String(sourceKey || '').trim();
+  if (!key || !filter) return filter;
+  // Full tag from Import tab: `mellat:Bank Mellat DB1.csv`
+  if (key.includes(':')) {
+    return { $and: [filter, { sources: key }] };
+  }
+  // Source layout id: `mellat` -> any file from that layout
   return {
     $and: [
       filter,
-      { sources: { $regex: `^${escapeRegex(id)}:` } },
+      { sources: { $regex: `^${escapeRegex(key)}:` } },
     ],
   };
 }
@@ -79,7 +84,7 @@ function withSourceFilter(filter, sourceId) {
 /**
  * Run the Mongo side of a search.
  * Returns { query, candidates, tookMs, capped, sourceId }.
- * @param {string} [opts.sourceId] - when set, only persons from that imported database
+ * @param {string} [opts.sourceId] - source layout id OR full `source:filename` tag
  */
 async function search(col, raw, { limit = DEFAULT_LIMIT, sourceId = null } = {}) {
   const query = classifyQuery(raw);
