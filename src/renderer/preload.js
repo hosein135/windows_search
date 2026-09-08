@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld('api', {
   getGpuFlags: () => ipcRenderer.invoke('gpu:flags'),
   dbStatus: () => ipcRenderer.invoke('db:status'),
   scanFiles: () => ipcRenderer.invoke('files:scan'),
+  listFiles: () => ipcRenderer.invoke('files:list'),
   importedDatabases: () => ipcRenderer.invoke('databases:imported'),
   search: (q, opts) => ipcRenderer.invoke('search:run', { q, ...(opts || {}) }),
   startImport: (opts) => ipcRenderer.invoke('import:start', opts),

@@ -91,28 +91,50 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
 
   ipcMain.handle('db:status', async () => db.status());
 
-  ipcMain.handle('files:scan', async () => {
-    const files = scanCsvFiles(databasesDir);
-    const imported = await db.importedSourceStats();
+  function mapScanFiles(files, imported) {
     return files.map((f) => {
       if (!f.known) {
         return { ...f, imported: false, importedPersons: 0, importTag: null };
       }
       const tag = `${f.source}:${f.name}`;
-      let persons = imported.byTag[tag];
-      // Basename fallback when an older tag shape is present
-      if (persons == null && imported.byFile[f.name]) persons = imported.byFile[f.name].persons;
-      const n = persons || 0;
+      const persons = Object.prototype.hasOwnProperty.call(imported.byTag, tag)
+        ? imported.byTag[tag]
+        : 0;
+      // persons: number = count, null = present (count unknown), 0 = not imported
+      const importedFlag = persons == null || persons > 0;
       return {
         ...f,
-        imported: n > 0,
-        importedPersons: n,
+        imported: importedFlag,
+        importedPersons: persons == null ? null : persons,
         importTag: tag,
       };
     });
+  }
+
+  /** Disk-only listing — no Mongo. Used to paint the Import tab immediately. */
+  ipcMain.handle('files:list', async () => {
+    const files = scanCsvFiles(databasesDir);
+    return files.map((f) => ({
+      ...f,
+      imported: false,
+      importedPersons: null,
+      importTag: f.known ? `${f.source}:${f.name}` : null,
+      statusPending: true,
+    }));
   });
 
-  ipcMain.handle('databases:imported', async () => db.importedDatabases());
+  ipcMain.handle('files:scan', async () => {
+    const files = scanCsvFiles(databasesDir);
+    const tags = files.filter((f) => f.known).map((f) => `${f.source}:${f.name}`);
+    const imported = await db.importedSourceStats(tags);
+    return mapScanFiles(files, imported);
+  });
+
+  ipcMain.handle('databases:imported', async () => {
+    const files = scanCsvFiles(databasesDir);
+    const tags = files.filter((f) => f.known).map((f) => `${f.source}:${f.name}`);
+    return db.importedDatabases(tags);
+  });
 
   ipcMain.handle('search:run', async (_e, payload) => {
     const raw = typeof payload === 'string' ? payload : (payload && payload.q);
@@ -131,7 +153,18 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
   const progressSender = () => {
     const win = getWindow();
     const wc = win && !win.isDestroyed() ? win.webContents : null;
-    return (payload) => { if (wc && !wc.isDestroyed()) wc.send('import:progress', payload); };
+    return (payload) => {
+      // Cache per-file person counts so the next Import/Search load is instant.
+      if (payload && (payload.phase === 'file-done' || payload.phase === 'done')) {
+        const source = payload.source;
+        const file = payload.file;
+        const persons = payload.persons;
+        if (source && file && persons != null) {
+          db.recordSourceStat(`${source}:${file}`, persons).catch(() => {});
+        }
+      }
+      if (wc && !wc.isDestroyed()) wc.send('import:progress', payload);
+    };
   };
 
   async function runParallel({ files, gpuNormalize, workers, inflight, send }) {
@@ -179,6 +212,7 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       return { error: err.message };
     } finally {
       importAbort = null;
+      db.invalidateSourceStatsCache();
       send({ phase: 'all-done' });
     }
   });
@@ -213,6 +247,7 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       return { error: err.message };
     } finally {
       importAbort = null;
+      db.invalidateSourceStatsCache();
       send({ phase: 'all-done' });
     }
   });

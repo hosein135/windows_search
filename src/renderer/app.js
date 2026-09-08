@@ -4,6 +4,7 @@
 
 (function () {
   const $ = (sel) => document.querySelector(sel);
+  let filesCache = [];
 
   /* ----------------------------- tabs ----------------------------- */
   document.querySelectorAll('.tab').forEach((btn) => {
@@ -11,8 +12,9 @@
       document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
       document.querySelectorAll('.tab-page').forEach((p) =>
         p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`));
-      if (btn.dataset.tab === 'search') refreshDatabaseSelector().catch(() => {});
-      if (btn.dataset.tab === 'import') scanFiles().catch(() => {});
+      // Reuse startup scan — do not re-hit Mongo on every tab switch
+      if (btn.dataset.tab === 'search') refreshDatabaseSelector();
+      if (btn.dataset.tab === 'import' && !filesCache.length) scanFiles().catch(() => {});
     });
   });
 
@@ -184,11 +186,11 @@
   const FIELD_BIT = { searchName: 1, nationalCode: 2, mobile: 4, card: 8 };
   const hl = (text, on) => `<span class="${on ? 'hit' : ''}" dir="auto">${esc(text)}</span>`;
 
-  async function refreshDatabaseSelector() {
+  function refreshDatabaseSelector() {
     const prev = dbSelect.value;
     const byId = new Map();
 
-    // Build from scanned CSVs under databases/ (same data as the Import tab)
+    // Built only from the local scan cache (no extra Mongo round-trip)
     for (const f of filesCache) {
       if (!f.known || !f.source) continue;
       const cur = byId.get(f.source) || {
@@ -196,27 +198,15 @@
         label: f.sourceLabel || f.source,
         persons: 0,
         imported: false,
+        pending: !!f.statusPending,
       };
       if (f.sourceLabel) cur.label = f.sourceLabel;
+      if (f.statusPending) cur.pending = true;
       if (f.imported) {
         cur.imported = true;
-        cur.persons += f.importedPersons || 0;
+        if (f.importedPersons) cur.persons += f.importedPersons;
       }
       byId.set(f.source, cur);
-    }
-
-    // Merge any Mongo-only sources (files removed from disk after import)
-    if (typeof window.api.importedDatabases === 'function') {
-      try {
-        const res = await window.api.importedDatabases();
-        for (const d of (res && res.databases) || []) {
-          const cur = byId.get(d.id) || { id: d.id, label: d.label, persons: 0, imported: false };
-          cur.imported = true;
-          if (d.label) cur.label = d.label;
-          if (d.persons && d.persons > cur.persons) cur.persons = d.persons;
-          byId.set(d.id, cur);
-        }
-      } catch { /* keep scan-based list */ }
     }
 
     const dbs = [...byId.values()].sort((a, b) => a.label.localeCompare(b.label));
@@ -225,7 +215,9 @@
       options.push('<option value="" disabled>(no databases found under databases\\)</option>');
     } else {
       for (const d of dbs) {
-        if (d.imported) {
+        if (d.pending && !d.imported) {
+          options.push(`<option value="${esc(d.id)}" disabled>${esc(d.label)} (checking…)</option>`);
+        } else if (d.imported) {
           const count = d.persons ? ` (${d.persons.toLocaleString()})` : '';
           options.push(`<option value="${esc(d.id)}">${esc(d.label)}${count}</option>`);
         } else {
@@ -301,8 +293,6 @@
   });
 
   /* ---------------------------- import ----------------------------- */
-  let filesCache = [];
-
   function fmtSize(bytes) {
     if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(2)} GB`;
     if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)} MB`;
@@ -327,46 +317,66 @@
     $('#workers-label').style.display = o.parallel ? 'flex' : 'none';
   }
 
-  async function scanFiles() {
-    filesCache = await window.api.scanFiles();
+  function renderFilesTable() {
     const known = filesCache.filter((f) => f.known);
     const already = known.filter((f) => f.imported);
+    const pendingStatus = filesCache.some((f) => f.statusPending);
+    const personRefs = already.reduce((a, f) => a + (f.importedPersons || 0), 0);
     $('#import-summary').innerHTML =
       `${filesCache.length} CSV file(s) found, ${known.length} with a known layout` +
-      (already.length
-        ? `, <b>${already.length} already in MongoDB</b> (${already.reduce((a, f) => a + f.importedPersons, 0).toLocaleString()} person refs)`
-        : '') +
+      (pendingStatus
+        ? ', checking MongoDB import status…'
+        : (already.length
+          ? `, <b>${already.length} already in MongoDB</b>` +
+            (personRefs ? ` (${personRefs.toLocaleString()} person refs)` : '')
+          : '')) +
       ` - ${fmtSize(filesCache.reduce((a, f) => a + f.sizeBytes, 0))} total.` +
-      (known.length ? ' Use each file\'s Import button for file-by-file mode, or Import selected files for batch. Re-import upserts (safe).' : '');
+      (known.length && !pendingStatus
+        ? ' Use each file\'s Import button for file-by-file mode, or Import selected files for batch. Re-import upserts (safe).'
+        : '');
     $('#files-body').innerHTML = filesCache.map((f, i) => {
-      const state = !f.known
-        ? 'skipped'
-        : f.imported
+      let state;
+      let stateClass = '';
+      if (!f.known) state = 'skipped';
+      else if (f.statusPending) state = 'checking…';
+      else if (f.imported) {
+        state = f.importedPersons != null
           ? `imported (${f.importedPersons.toLocaleString()} persons)`
-          : 'pending';
-      const stateClass = f.imported ? 'chip-ok' : '';
+          : 'imported';
+        stateClass = 'chip-ok';
+      } else state = 'pending';
       return `
       <tr data-path="${esc(f.path)}" class="${f.imported ? 'file-imported' : ''}">
-        <td><input type="checkbox" class="file-chk" data-i="${i}" ${f.known && !f.imported ? 'checked' : ''} ${f.known ? '' : 'disabled'} /></td>
-        <td><button class="btn-import-one" data-i="${i}" ${f.known ? '' : 'disabled'}>${f.imported ? 'Re-import' : 'Import'}</button></td>
+        <td><input type="checkbox" class="file-chk" data-i="${i}" ${f.known && !f.imported && !f.statusPending ? 'checked' : ''} ${f.known ? '' : 'disabled'} /></td>
+        <td><button class="btn-import-one" data-i="${i}" ${f.known && !f.statusPending ? '' : 'disabled'}>${f.imported ? 'Re-import' : 'Import'}</button></td>
         <td>${esc(f.folder)} / ${esc(f.name)}</td>
         <td>${esc(f.sourceLabel)}</td>
         <td>${fmtSize(f.sizeBytes)}</td>
         <td class="c-rows">-</td>
-        <td class="c-persons">${f.imported ? f.importedPersons.toLocaleString() : '-'}</td>
+        <td class="c-persons">${f.imported && f.importedPersons != null ? f.importedPersons.toLocaleString() : '-'}</td>
         <td class="c-skipped">-</td>
         <td class="c-rate">-</td><td class="c-chunks">-</td>
         <td class="c-state ${stateClass}">${state}</td>
       </tr>`;
     }).join('');
-    $('#btn-import').disabled = !known.length;
+    $('#btn-import').disabled = !known.length || pendingStatus;
 
-    // Wire per-file import buttons
     document.querySelectorAll('.btn-import-one').forEach((btn) => {
       btn.addEventListener('click', () => importOneFile(Number(btn.dataset.i)));
     });
     renderImportPlan();
-    await refreshDatabaseSelector();
+    refreshDatabaseSelector();
+  }
+
+  async function scanFiles() {
+    // Phase 1: disk only — paint Import + DB selector immediately
+    if (typeof window.api.listFiles === 'function') {
+      filesCache = await window.api.listFiles();
+      renderFilesTable();
+    }
+    // Phase 2: cheap per-file indexed presence/count cache
+    filesCache = await window.api.scanFiles();
+    renderFilesTable();
   }
 
   function updateFileRow(fileName, p) {
@@ -584,13 +594,17 @@
   /* ----------------------------- init ------------------------------ */
   (async function init() {
     const flags = (await window.api.getGpuFlags().catch(() => null)) || {};
+    // Start disk scan immediately so Search/Import UI populate without waiting on hardware
+    const scanPromise = scanFiles().catch((err) => console.warn('[scan]', err));
     await window.GpuRank.initGpu({ allowSoftware: !!flags.allowSoftware });
     window.api.reportGpuState(window.GpuRank.state());
     renderGpuChip();
-    await renderHardware(false);
-    await refreshStatus();
-    await scanFiles(); // auto-scan databases/ + fill search DB selector
-    await refreshStorage();
+    await Promise.all([
+      renderHardware(false).catch(() => {}),
+      refreshStatus().catch(() => {}),
+      scanPromise,
+    ]);
+    refreshStorage().catch(() => {});
     setInterval(refreshStatus, 15_000);
   })();
 })();

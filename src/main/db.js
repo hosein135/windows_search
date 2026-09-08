@@ -132,80 +132,136 @@ async function status() {
 }
 
 /**
- * Map of import source tags -> person counts.
- * Tags are written as `${sourceId}:${basename}` on each person (see normalize.buildPerson).
- * Returns {} when mongod is unreachable.
+ * Fast import-status lookup for known source tags (`sourceId:filename`).
+ *
+ * Avoids a full-collection $unwind/$group (that was dominating Import/Search
+ * load time on large DBs). Instead:
+ *   1. Read cached counts from the tiny `source_stats` collection (written at
+ *      import time).
+ *   2. For tags with no cache row, one indexed findOne({ sources: tag }) to
+ *      detect presence (no full count).
+ *
+ * byTag values: number (>=0) = person count, null = present but count unknown.
  */
-async function importedSourceStats() {
+const SOURCE_STATS_COLLECTION = 'source_stats';
+let sourceStatsMem = { key: '', at: 0, value: null };
+const SOURCE_STATS_TTL_MS = 30_000;
+
+function sourceStatsCol() {
+  return rawDb().collection(SOURCE_STATS_COLLECTION);
+}
+
+function invalidateSourceStatsCache() {
+  sourceStatsMem = { key: '', at: 0, value: null };
+}
+
+async function recordSourceStat(tag, persons) {
+  if (!tag) return;
   try {
     await connect();
-    const rows = await persons().aggregate([
-      { $match: { sources: { $exists: true, $ne: [] } } },
-      { $unwind: '$sources' },
-      { $group: { _id: '$sources', persons: { $sum: 1 } } },
-    ], { allowDiskUse: true }).toArray();
+    await sourceStatsCol().updateOne(
+      { _id: tag },
+      { $set: { persons: Number(persons) || 0, updatedAt: new Date() } },
+      { upsert: true },
+    );
+    invalidateSourceStatsCache();
+  } catch { /* best-effort cache */ }
+}
+
+async function importedSourceStats(knownTags = []) {
+  const tags = [...new Set((knownTags || []).filter((t) => typeof t === 'string' && t))];
+  const key = tags.slice().sort().join('\0');
+  if (
+    sourceStatsMem.value
+    && sourceStatsMem.key === key
+    && Date.now() - sourceStatsMem.at < SOURCE_STATS_TTL_MS
+  ) {
+    return sourceStatsMem.value;
+  }
+
+  try {
+    await connect();
+    const col = persons();
     const byTag = {};
-    const byFile = {}; // basename -> { persons, tags: [] } (fallback if layout id differs)
-    for (const r of rows) {
-      const tag = r._id;
-      if (typeof tag !== 'string' || !tag) continue;
-      byTag[tag] = r.persons;
+    const byFile = {};
+
+    if (!tags.length) {
+      const empty = { ok: true, byTag, byFile };
+      sourceStatsMem = { key, at: Date.now(), value: empty };
+      return empty;
+    }
+
+    // Batch-read cached counts (tiny collection — instant)
+    const cachedRows = await sourceStatsCol()
+      .find({ _id: { $in: tags } }, { projection: { persons: 1 } })
+      .toArray();
+    const cached = Object.fromEntries(cachedRows.map((r) => [r._id, r.persons]));
+
+    await Promise.all(tags.map(async (tag) => {
+      if (cached[tag] != null) {
+        byTag[tag] = cached[tag];
+      } else {
+        // Indexed equality probe — does not count millions of docs
+        const hit = await col.findOne({ sources: tag }, { projection: { _id: 1 } });
+        byTag[tag] = hit ? null : 0;
+      }
       const colon = tag.indexOf(':');
       const fileName = colon >= 0 ? tag.slice(colon + 1) : tag;
-      if (!byFile[fileName]) byFile[fileName] = { persons: 0, tags: [] };
-      byFile[fileName].persons += r.persons;
+      if (!byFile[fileName]) byFile[fileName] = { persons: 0, tags: [], present: false };
+      const n = byTag[tag];
+      if (n == null) byFile[fileName].present = true;
+      else if (n > 0) {
+        byFile[fileName].persons += n;
+        byFile[fileName].present = true;
+      }
       byFile[fileName].tags.push(tag);
-    }
-    return { ok: true, byTag, byFile };
+    }));
+
+    const out = { ok: true, byTag, byFile };
+    sourceStatsMem = { key, at: Date.now(), value: out };
+    return out;
   } catch (err) {
     return { ok: false, error: err.message, byTag: {}, byFile: {} };
   }
 }
 
 /**
- * Imported CSV "databases" (source layouts) present in MongoDB, with person counts.
- * Source tags look like `${sourceId}:${filename}`; we group by sourceId.
- * Uses distinct()+count rather than a full unwind aggregate so large DBs stay responsive.
+ * Imported CSV databases grouped by source id, derived from known tags + fast stats.
+ * @param {string[]} knownTags tags like `mellat:file.csv`
  */
-async function importedDatabases() {
+async function importedDatabases(knownTags = []) {
   const { SOURCES } = require('./schemas');
-  try {
-    await connect();
-    const col = persons();
-    const tags = await col.distinct('sources');
-    const byId = {};
-    for (const tag of tags) {
-      if (typeof tag !== 'string' || !tag) continue;
-      const colon = tag.indexOf(':');
-      const id = colon >= 0 ? tag.slice(0, colon) : tag;
-      if (!id) continue;
-      if (!byId[id]) byId[id] = { tags: [], persons: 0 };
-      byId[id].tags.push(tag);
-    }
+  const stats = await importedSourceStats(knownTags);
+  if (!stats.ok) return { ok: false, error: stats.error, databases: [] };
 
-    // Person counts per source (one countDocuments each — indexed on sources)
-    await Promise.all(Object.keys(byId).map(async (id) => {
-      const re = new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:`);
-      byId[id].persons = await col.countDocuments({ sources: re });
+  const byId = {};
+  for (const [tag, count] of Object.entries(stats.byTag)) {
+    const colon = tag.indexOf(':');
+    const id = colon >= 0 ? tag.slice(0, colon) : tag;
+    if (!id) continue;
+    if (!byId[id]) byId[id] = { persons: 0, imported: false };
+    if (count == null) byId[id].imported = true;
+    else if (count > 0) {
+      byId[id].imported = true;
+      byId[id].persons += count;
+    }
+  }
+
+  const labelById = Object.fromEntries(SOURCES.map((s) => [s.id, s.label]));
+  const databases = Object.keys(byId)
+    .filter((id) => byId[id].imported)
+    .sort((a, b) => (labelById[a] || a).localeCompare(labelById[b] || b))
+    .map((id) => ({
+      id,
+      label: labelById[id] || id,
+      persons: byId[id].persons,
     }));
 
-    const labelById = Object.fromEntries(SOURCES.map((s) => [s.id, s.label]));
-    const databases = Object.keys(byId)
-      .sort((a, b) => (labelById[a] || a).localeCompare(labelById[b] || b))
-      .map((id) => ({
-        id,
-        label: labelById[id] || id,
-        persons: byId[id].persons,
-      }));
-
-    return { ok: true, databases };
-  } catch (err) {
-    return { ok: false, error: err.message, databases: [] };
-  }
+  return { ok: true, databases };
 }
 
 module.exports = {
   connect, close, persons, rawDb, ensureIndexes, status, importedSourceStats,
-  importedDatabases,
+  importedDatabases, recordSourceStat, invalidateSourceStatsCache,
   DEFAULT_URL, DB_NAME, PERSONS_COLLECTION,
 };
