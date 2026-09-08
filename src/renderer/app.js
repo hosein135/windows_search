@@ -12,6 +12,7 @@
       document.querySelectorAll('.tab-page').forEach((p) =>
         p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`));
       if (btn.dataset.tab === 'search') refreshDatabaseSelector().catch(() => {});
+      if (btn.dataset.tab === 'import') scanFiles().catch(() => {});
     });
   });
 
@@ -185,13 +186,55 @@
 
   async function refreshDatabaseSelector() {
     const prev = dbSelect.value;
-    const res = await window.api.importedDatabases().catch(() => ({ ok: false, databases: [] }));
-    const dbs = (res && res.databases) || [];
-    const options = [`<option value="">All databases</option>`]
-      .concat(dbs.map((d) =>
-        `<option value="${esc(d.id)}">${esc(d.label)} (${d.persons.toLocaleString()})</option>`));
+    const byId = new Map();
+
+    // Build from scanned CSVs under databases/ (same data as the Import tab)
+    for (const f of filesCache) {
+      if (!f.known || !f.source) continue;
+      const cur = byId.get(f.source) || {
+        id: f.source,
+        label: f.sourceLabel || f.source,
+        persons: 0,
+        imported: false,
+      };
+      if (f.sourceLabel) cur.label = f.sourceLabel;
+      if (f.imported) {
+        cur.imported = true;
+        cur.persons += f.importedPersons || 0;
+      }
+      byId.set(f.source, cur);
+    }
+
+    // Merge any Mongo-only sources (files removed from disk after import)
+    if (typeof window.api.importedDatabases === 'function') {
+      try {
+        const res = await window.api.importedDatabases();
+        for (const d of (res && res.databases) || []) {
+          const cur = byId.get(d.id) || { id: d.id, label: d.label, persons: 0, imported: false };
+          cur.imported = true;
+          if (d.label) cur.label = d.label;
+          if (d.persons && d.persons > cur.persons) cur.persons = d.persons;
+          byId.set(d.id, cur);
+        }
+      } catch { /* keep scan-based list */ }
+    }
+
+    const dbs = [...byId.values()].sort((a, b) => a.label.localeCompare(b.label));
+    const options = ['<option value="">All databases</option>'];
+    if (!dbs.length) {
+      options.push('<option value="" disabled>(no databases found under databases\\)</option>');
+    } else {
+      for (const d of dbs) {
+        if (d.imported) {
+          const count = d.persons ? ` (${d.persons.toLocaleString()})` : '';
+          options.push(`<option value="${esc(d.id)}">${esc(d.label)}${count}</option>`);
+        } else {
+          options.push(`<option value="${esc(d.id)}" disabled>${esc(d.label)} (not imported)</option>`);
+        }
+      }
+    }
     dbSelect.innerHTML = options.join('');
-    if (prev && dbs.some((d) => d.id === prev)) dbSelect.value = prev;
+    if (prev && dbs.some((d) => d.id === prev && d.imported)) dbSelect.value = prev;
   }
 
   async function runSearch() {
@@ -323,6 +366,7 @@
       btn.addEventListener('click', () => importOneFile(Number(btn.dataset.i)));
     });
     renderImportPlan();
+    await refreshDatabaseSelector();
   }
 
   function updateFileRow(fileName, p) {
@@ -340,8 +384,6 @@
       row.querySelector('.c-state').textContent = `${p.phase} ${pct.toFixed(0)}%`;
     }
   }
-
-  $('#btn-scan').addEventListener('click', scanFiles);
 
   function describeTotals(res, prefix) {
     const t = res.totals;
@@ -372,7 +414,6 @@
     refreshStorage();
     renderComputePlan().catch(() => {});
     await scanFiles(); // refresh imported / pending State from MongoDB
-    await refreshDatabaseSelector();
   });
 
   for (const id of ['#chk-parallel', '#workers-count', '#inflight-count', '#chk-gpu-normalize']) {
@@ -411,7 +452,6 @@
     refreshStatus();
     refreshStorage();
     await scanFiles(); // mark this file as imported in State
-    await refreshDatabaseSelector();
   }
 
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
@@ -549,8 +589,7 @@
     renderGpuChip();
     await renderHardware(false);
     await refreshStatus();
-    await scanFiles();
-    await refreshDatabaseSelector();
+    await scanFiles(); // auto-scan databases/ + fill search DB selector
     await refreshStorage();
     setInterval(refreshStatus, 15_000);
   })();

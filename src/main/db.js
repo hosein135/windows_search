@@ -165,30 +165,43 @@ async function importedSourceStats() {
 /**
  * Imported CSV "databases" (source layouts) present in MongoDB, with person counts.
  * Source tags look like `${sourceId}:${filename}`; we group by sourceId.
+ * Uses distinct()+count rather than a full unwind aggregate so large DBs stay responsive.
  */
 async function importedDatabases() {
   const { SOURCES } = require('./schemas');
-  const stats = await importedSourceStats();
-  if (!stats.ok) return { ok: false, error: stats.error, databases: [] };
+  try {
+    await connect();
+    const col = persons();
+    const tags = await col.distinct('sources');
+    const byId = {};
+    for (const tag of tags) {
+      if (typeof tag !== 'string' || !tag) continue;
+      const colon = tag.indexOf(':');
+      const id = colon >= 0 ? tag.slice(0, colon) : tag;
+      if (!id) continue;
+      if (!byId[id]) byId[id] = { tags: [], persons: 0 };
+      byId[id].tags.push(tag);
+    }
 
-  const byId = {};
-  for (const [tag, count] of Object.entries(stats.byTag)) {
-    const colon = tag.indexOf(':');
-    const id = colon >= 0 ? tag.slice(0, colon) : tag;
-    if (!id) continue;
-    byId[id] = (byId[id] || 0) + count;
-  }
-
-  const labelById = Object.fromEntries(SOURCES.map((s) => [s.id, s.label]));
-  const databases = Object.keys(byId)
-    .sort((a, b) => (labelById[a] || a).localeCompare(labelById[b] || b))
-    .map((id) => ({
-      id,
-      label: labelById[id] || id,
-      persons: byId[id],
+    // Person counts per source (one countDocuments each — indexed on sources)
+    await Promise.all(Object.keys(byId).map(async (id) => {
+      const re = new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:`);
+      byId[id].persons = await col.countDocuments({ sources: re });
     }));
 
-  return { ok: true, databases };
+    const labelById = Object.fromEntries(SOURCES.map((s) => [s.id, s.label]));
+    const databases = Object.keys(byId)
+      .sort((a, b) => (labelById[a] || a).localeCompare(labelById[b] || b))
+      .map((id) => ({
+        id,
+        label: labelById[id] || id,
+        persons: byId[id].persons,
+      }));
+
+    return { ok: true, databases };
+  } catch (err) {
+    return { ok: false, error: err.message, databases: [] };
+  }
 }
 
 module.exports = {
