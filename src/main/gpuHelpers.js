@@ -18,7 +18,8 @@
  *   3. each helper loads renderer/helper.html (same gpuRank.js kernels),
  *      connects back over a named pipe and reports its WebGPU adapter
  *   4. the GpuPool registers it; a helper that landed on the SAME adapter as
- *      the main window is redundant and is shut down again (runtime detection)
+ *      the main window is redundant and is shut down again (runtime detection).
+ *      The main window's CPU worker pool is a separate endpoint and stays.
  *
  * Everything degrades gracefully: no counters, no second GPU, or a helper that
  * fails to start simply means fewer endpoints in the pool.

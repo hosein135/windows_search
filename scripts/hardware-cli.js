@@ -43,7 +43,7 @@ const { getHardware } = require('../src/main/hardware');
   console.log(`  In-flight writes    : ${hw.plan.inflightWritesPerWorker} per worker -> ${hw.plan.concurrentBulkWrites} concurrent bulkWrites`);
   console.log(`  File chunking       : ${hw.plan.chunking}`);
   console.log(`  GPU processes       : ${hw.plan.gpuProcesses}`);
-  console.log(`  CPU rank workers    : ${hw.plan.cpuRankWorkers} (GUI fallback when no GPU)`);
+  console.log(`  CPU rank workers    : ${hw.plan.cpuRankWorkers} (run in parallel with every GPU)`);
   console.log('');
   console.log(`  Run:  bun scripts/import-cli.js --parallel --workers ${hw.plan.importWorkers} --inflight ${hw.plan.inflightWritesPerWorker}`);
   console.log('');

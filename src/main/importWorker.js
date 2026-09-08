@@ -11,10 +11,11 @@
  * Backpressure: the file stream is paused when the in-flight limit is hit and
  * when csv-parse's buffer is full.
  *
- * Optional GPU fold: text cells of a batch are sent to the main thread, which
- * shards them across every WebGPU endpoint it knows (main window adapter +
- * pinned helper-process GPUs). If the GPU path fails or times out the worker
- * simply lets buildPerson() fold on the CPU (the fold is idempotent).
+ * Optional GPU+CPU fold: text cells of a batch are sent to the main thread,
+ * which shards them across every compute endpoint (main window adapter +
+ * pinned helper-process GPUs + CPU workers). If that path fails or times out
+ * the worker simply lets buildPerson() fold on the CPU (the fold is
+ * idempotent).
  *
  * Chunk boundary rule (every byte of the file is handled exactly once):
  *   - chunk i owns the lines that START in [start, end)

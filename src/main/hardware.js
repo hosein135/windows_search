@@ -136,7 +136,8 @@ async function getHardware({ force = false } = {}) {
           + 'so Chromium binds to the fast adapter instead of the laptop default). '
         : 'Secondary adapter: Chromium exposes one adapter per process, so this GPU is driven by a hidden '
           + 'helper Electron process pinned with --use-adapter-luid. ')
-        + 'Runs the WGSL rank kernel (search results) and the fold kernel (import text), sharded by weight.',
+        + 'Runs the WGSL rank kernel (search results) and the fold kernel (import text), sharded by weight '
+        + 'in parallel with the CPU worker pool.',
     });
   }
   const basic = gpus.filter((g) => g.kind === 'other');
@@ -144,7 +145,7 @@ async function getHardware({ force = false } = {}) {
     involvement.push({
       device: 'GPU',
       role: 'gpu-unavailable',
-      detail: 'No display adapter reported by Win32_VideoController - CPU worker pool ranks instead.',
+      detail: 'No display adapter reported by Win32_VideoController - CPU worker pool ranks and folds.',
     });
   } else if (!hardwareGpus.length) {
     involvement.push({
@@ -165,13 +166,13 @@ async function getHardware({ force = false } = {}) {
     role: 'parallel-import',
     detail: `${threads} logical thread(s) -> ${plan.importWorkers} import worker(s), each parsing its own byte-range chunk of the `
       + `CSVs and writing to MongoDB with ${plan.inflightWritesPerWorker} bulkWrites in flight (${plan.concurrentBulkWrites} concurrent). `
-      + `Search: ${plan.cpuRankWorkers} rank worker(s) take over when no GPU is usable; the main thread only orchestrates.`,
+      + `Search: ${plan.cpuRankWorkers} rank worker(s) score candidates in parallel with every GPU (same kernel as WGSL); they also take a GPU's shard if that process fails.`,
   });
   involvement.push({
     device: 'MongoDB (mongod)',
     role: 'storage',
-    detail: 'Stores one document per person; indexes (nationalCode, mobile, card, name) '
-      + 'narrow candidates before GPU ranking. Its own threads absorb the concurrent writes.',
+      detail: 'Stores one document per person; indexes (nationalCode, mobile, card, name) '
+        + 'narrow candidates before GPU+CPU ranking. Its own threads absorb the concurrent writes.',
   });
 
   cache = {
@@ -187,7 +188,7 @@ async function getHardware({ force = false } = {}) {
     hardwareGpuCount: hardwareGpus.length,
     adapterLuids: luids,
     nvidiaSmi: smi,
-    preferredRanker: hardwareGpus.length ? 'webgpu' : 'cpu',
+    preferredRanker: hardwareGpus.length ? 'webgpu+cpu' : 'cpu',
     plan,
     involvement,
     detectedAt: new Date().toISOString(),

@@ -12,7 +12,8 @@
  *     bounded number of in-flight writes; parse and write overlap per worker,
  *     and N workers write concurrently.
  *   - The main thread only aggregates progress per file and brokers optional
- *     GPU fold requests to the WebGPU endpoints (main window + helper GPUs).
+ *     GPU+CPU fold requests to the compute pool (main window GPU + helper
+ *     GPUs + CPU workers).
  *
  * Also runs under Bun (worker_threads + mongodb) for an extra I/O speedup with
  * zero code changes.

@@ -353,7 +353,7 @@ function Show-PipelineInvolvement {
             if ($intel.Count -gt 0 -and $nvidia.Count -gt 0) {
                 Write-Host "                    expected: $($intel[0].Name) (integrated Intel, weight 1) alongside the NVIDIA main window" -ForegroundColor Cyan
             }
-            Write-Host "   - sharding     : search ranking + import text folding split across all GPU processes by weight," -ForegroundColor White
+            Write-Host "   - sharding     : search ranking + import text folding split across all GPU processes AND CPU workers by weight," -ForegroundColor White
             Write-Host "                    re-tuned from measured throughput so the iGPU never stalls the dGPU" -ForegroundColor DarkGray
         } else {
             Write-Host "   - helpers      : none - a single GPU adapter; nothing to pin a second process to" -ForegroundColor DarkGray
@@ -367,7 +367,7 @@ function Show-PipelineInvolvement {
     Write-Host "   - import       : $threads worker threads (one per logical CPU); every CSV is split into byte-range chunks so" -ForegroundColor Cyan
     Write-Host "                    even one huge file keeps all cores busy; each worker writes to MongoDB with 2 bulkWrites" -ForegroundColor Cyan
     Write-Host "                    in flight ($($threads * 2) concurrent) while it parses the next batch" -ForegroundColor Cyan
-    Write-Host "   - search       : $([math]::Max(1, $threads - 1)) rank worker(s) - idle while a GPU ranks, take over instantly on GPU failure" -ForegroundColor Cyan
+    Write-Host "   - search       : $([math]::Max(1, $threads - 1)) rank worker(s) score candidates in parallel with every GPU (same kernel); they also take over a GPU's shard on failure" -ForegroundColor Cyan
     Write-Host "   - main thread  : orchestration only (IPC, progress, GPU brokering)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  MongoDB (mongod)  : one document per person; indexes narrow candidates before GPU ranking;" -ForegroundColor White

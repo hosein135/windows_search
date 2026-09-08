@@ -3,8 +3,9 @@
 /**
  * Query planning + candidate selection (MongoDB side).
  *
- * Mongo narrows the set with indexes; the GPU (or CPU fallback) then ranks
- * the candidates. Query type is auto-detected:
+ * Mongo narrows the set with indexes; every GPU process plus the CPU
+ * worker pool then rank the candidates in parallel. Query type is
+ * auto-detected:
  *   10 digits              -> national code (exact)
  *   11 digits starting 09  -> mobile (exact, multikey)
  *   16 digits              -> payment card (exact, multikey)
@@ -108,6 +109,7 @@ async function search(col, raw, { limit = DEFAULT_LIMIT, sourceId = null } = {})
 /**
  * CPU fallback ranker (same scoring as the WGSL kernel).
  * Score = sum over fields of substring hits * field weight; exact hits win big.
+ * Used when the compute pool has no endpoints, or a shard's GPU/CPU worker fails.
  */
 const FIELD_WEIGHTS = { searchName: 3, nationalCode: 100, mobile: 80, card: 80 };
 

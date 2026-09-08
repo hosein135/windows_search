@@ -191,6 +191,73 @@ class FakeCollection {
     assert.ok(ranked[0].mask & 2, 'nationalCode bit should be set');
   });
 
+  console.log('== 4b. GpuPool GPU + CPU sharding ==');
+  await ok('cpuComputeWeight stays below discrete GPU weight', () => {
+    const { cpuComputeWeight, BASE_WEIGHT } = require('../src/main/gpuPool');
+    assert.ok(cpuComputeWeight(8) >= 1);
+    assert.ok(cpuComputeWeight(8) < BASE_WEIGHT.discrete);
+    assert.ok(cpuComputeWeight(64) <= 3);
+  });
+  await ok('pool shards rank across NVIDIA + CPU and merges topK', async () => {
+    const { GpuPool } = require('../src/main/gpuPool');
+    const pool = new GpuPool();
+    const seen = [];
+    pool.register({
+      id: 'renderer', kind: 'renderer', label: 'main window',
+      adapter: { vendor: 'nvidia', architecture: 'maxwell', device: 'x', description: 'gtx' },
+      send: async (op, payload) => {
+        if (op === 'rank') {
+          seen.push(['gpu', payload.candidates.length]);
+          return {
+            results: payload.candidates.map((doc) => ({ doc, score: 1, mask: 1 })),
+            device: 'gpu', shards: [],
+          };
+        }
+        return payload.strings.slice();
+      },
+    });
+    pool.register({
+      id: 'cpu', kind: 'cpu', label: 'CPU workers', meta: { cpuWorkers: 8 },
+      send: async (op, payload) => {
+        if (op === 'rank') {
+          seen.push(['cpu', payload.candidates.length]);
+          return {
+            results: payload.candidates.map((doc) => ({ doc, score: 2, mask: 1 })),
+            device: 'cpu-pool', shards: [],
+          };
+        }
+        return payload.strings.map((s) => s.replace(/ي/g, 'ی'));
+      },
+    });
+    assert.strictEqual(pool.hasGpu(), true);
+    assert.strictEqual(pool.hasCompute(), true);
+    const plan = pool.plan();
+    assert.ok(plan.cpuActive);
+    assert.strictEqual(plan.gpuCount, 1);
+    assert.ok(/GPU/i.test(plan.sharding) && /CPU/i.test(plan.sharding));
+
+    const docs = Array.from({ length: 2000 }, (_, i) => ({ searchName: `n${i}`, nationalCode: String(i) }));
+    const ranked = await pool.rank(docs, { type: 'name', tokens: ['n'], value: 'n' }, 50);
+    assert.ok(seen.some((s) => s[0] === 'gpu'), `gpu shard missing: ${JSON.stringify(seen)}`);
+    assert.ok(seen.some((s) => s[0] === 'cpu'), `cpu shard missing: ${JSON.stringify(seen)}`);
+    assert.ok(ranked.results.length <= 50);
+    assert.ok(ranked.results[0].score >= 1);
+    assert.ok(ranked.device.includes('gpu') && ranked.device.includes('cpu'), ranked.device);
+
+    const folded = await pool.fold(['علي', 'كتاب']);
+    assert.strictEqual(folded.length, 2);
+  });
+  await ok('hasGpu is false when only the CPU endpoint is active', () => {
+    const { GpuPool } = require('../src/main/gpuPool');
+    const pool = new GpuPool();
+    pool.register({
+      id: 'cpu', kind: 'cpu', meta: { cpuWorkers: 4 },
+      send: async () => [],
+    });
+    assert.strictEqual(pool.hasGpu(), false);
+    assert.strictEqual(pool.hasCompute(), true);
+  });
+
   console.log('== 5. real MongoDB (optional) ==');
   const canReach = await (async () => {
     try {

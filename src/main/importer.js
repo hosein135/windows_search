@@ -12,11 +12,11 @@
  * while the next batch is parsed (the parallel importer does the same per
  * worker thread, on every core - see parallelImporter.js).
  *
- * GPU hook: when the GUI enables "GPU normalize", each batch's text cells
- * (names/addresses) are Persian-folded by WebGPU compute shaders (sharded over
- * every GPU endpoint the main process knows) before the CPU builds the
- * documents. normalizePersianChars is idempotent, so a GPU-pre-folded cell
- * passes the CPU path unchanged.
+ * GPU hook: when the GUI enables GPU+CPU fold, each batch's text cells
+ * (names/addresses) are Persian-folded by WebGPU compute shaders and CPU
+ * workers together (sharded over every endpoint the main process knows)
+ * before the CPU builds the documents. normalizePersianChars is idempotent,
+ * so a pre-folded cell passes the CPU path unchanged.
  */
 
 const fs = require('fs');

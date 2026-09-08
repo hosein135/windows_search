@@ -2,11 +2,12 @@
 
 /**
  * GPU ranking + GPU text normalization via WebGPU compute shaders (WGSL),
- * with a CPU Web Worker pool as the parallel fallback.
+ * plus a CPU Web Worker pool that runs the same algorithms in parallel.
  *
  * The Mongo query narrows candidates with indexes; this module scores those
- * candidates ON THE GPU (one work-item per document) and, when enabled,
- * folds Persian characters for import batches on the GPU too.
+ * candidates (one work-item per document) and, when enabled, folds Persian
+ * characters for import batches. The GpuPool (main process) shards work
+ * across every GPU process AND this CPU pool at once - not GPU-or-CPU.
  *
  * Device model (runtime-detected, never hardcoded):
  *   - Every DISTINCT adapter WebGPU hands out is turned into a device and used
@@ -18,19 +19,28 @@
  *   - A software adapter (SwiftShader/WARP) is detected and reported but only
  *     used when explicitly allowed: for these kernels it is slower than JS.
  *   - CPU: navigator.hardwareConcurrency Web Workers run the same scoring
- *     over the same packed buffers when no GPU is usable, sharded by document
- *     range; tiny candidate sets stay on the main thread (no worker overhead).
+ *     and fold over the same data, in parallel with the GPUs. Tiny sets stay
+ *     on the main thread (no worker hop).
  *
- * Everything degrades to a CPU implementation when WebGPU is unavailable,
- * mirroring the bootstrap script's "runtime detection, never hardcoded" rule.
+ * `units` on rank/normalizeBatch:
+ *   'gpu'  - local WebGPU devices only (GpuPool GPU endpoint)
+ *   'cpu'  - CPU worker pool only (GpuPool CPU endpoint)
+ *   'all'  - GPUs + CPU together (standalone / fallback)
  */
 
 const FIELD_WEIGHTS = [3, 100, 80, 80]; // searchName, nationalCode, mobile, card
 const MAX_FIELD_UNITS = 256;
 const NUM_FIELDS = 4;
-const MIN_SHARD_DOCS = 512;      // below 2x this, one device does everything
-const CPU_POOL_MIN_DOCS = 2048;  // below this the main thread ranks (no worker hop)
-const FOLD_SHARD_MIN = 1024;
+const MIN_SHARD_DOCS = 128;      // below 2x this, one unit does everything
+const CPU_WORKER_MIN = 64;      // don't hop to a worker for tiny slices
+const FOLD_SHARD_MIN = 256;
+const CPU_FOLD_MIN = 128;
+
+/** Weight for the whole CPU pool vs a discrete GPU (4). Caps so GPUs stay primary. */
+function cpuComputeWeight(workers) {
+  const n = Math.max(1, Number(workers) || 1);
+  return Math.round(Math.min(3, Math.max(1, n * 0.15)) * 100) / 100;
+}
 
 /* ------------------------------------------------------------------ */
 /* WGSL kernels                                                        */
@@ -538,7 +548,7 @@ class CpuRankPool {
     this.pending = new Map();
     this.seq = 0;
     this.rr = 0;
-    this.stats = { calls: 0, docs: 0, ms: 0 };
+    this.stats = { calls: 0, docs: 0, foldCalls: 0, foldItems: 0, ms: 0 };
     for (let i = 0; i < size; i++) {
       const w = new Worker('rankWorker.js');
       w.onmessage = (e) => {
@@ -546,26 +556,85 @@ class CpuRankPool {
         if (!p) return;
         this.pending.delete(e.data.id);
         if (e.data.error) p.reject(new Error(e.data.error));
-        else p.resolve({ scores: e.data.scores, masks: e.data.masks });
+        else p.resolve(e.data);
       };
       w.onerror = (e) => console.warn('[cpu-pool] worker error', e.message);
       this.workers.push(w);
     }
   }
-  rank(packed, q, numTokens) {
+
+  _post(payload, transfer) {
     const id = ++this.seq;
     const w = this.workers[this.rr++ % this.workers.length];
-    const t0 = performance.now();
     return new Promise((resolve, reject) => {
-      this.pending.set(id, {
-        resolve: (r) => { this.stats.calls++; this.stats.docs += packed.numDocs; this.stats.ms += performance.now() - t0; resolve(r); },
-        reject,
-      });
-      w.postMessage({
-        id, meta: packed.meta, text: packed.text, qmeta: q.meta, qtext: q.text,
-        numDocs: packed.numDocs, numFields: NUM_FIELDS, numTokens, weights: FIELD_WEIGHTS,
-      }, [packed.meta.buffer, packed.text.buffer]);
+      this.pending.set(id, { resolve, reject });
+      if (transfer && transfer.length) w.postMessage({ ...payload, id }, transfer);
+      else w.postMessage({ ...payload, id });
     });
+  }
+
+  rankOne(packed, q, numTokens) {
+    const t0 = performance.now();
+    const n = packed.numDocs;
+    return this._post({
+      op: 'rank', meta: packed.meta, text: packed.text, qmeta: q.meta, qtext: q.text,
+      numDocs: packed.numDocs, numFields: NUM_FIELDS, numTokens, weights: FIELD_WEIGHTS,
+    }, [packed.meta.buffer, packed.text.buffer]).then((r) => {
+      this.stats.calls++;
+      this.stats.docs += n;
+      this.stats.ms += performance.now() - t0;
+      return { scores: r.scores, masks: r.masks };
+    });
+  }
+
+  /** Rank `docs` on as many workers as the slice can fill. */
+  async rankDocs(docs, q, numTokens) {
+    const n = docs.length;
+    if (!n) return { scores: new Uint32Array(0), masks: new Uint32Array(0) };
+    const nw = (n < CPU_WORKER_MIN || this.size <= 1)
+      ? 1
+      : Math.min(this.size, Math.ceil(n / CPU_WORKER_MIN));
+    if (nw === 1) return this.rankOne(packDocs(docs), q, numTokens);
+    const units = Array.from({ length: nw }, (_, i) => ({ id: `cpu${i}`, weight: 1 }));
+    const plan = shardByWeight(n, units, CPU_WORKER_MIN);
+    const parts = await Promise.all(plan.map((sh) => this.rankOne(packDocs(docs.slice(sh.start, sh.end)), q, numTokens)));
+    const scores = new Uint32Array(n);
+    const masks = new Uint32Array(n);
+    for (let i = 0; i < plan.length; i++) {
+      scores.set(parts[i].scores, plan[i].start);
+      masks.set(parts[i].masks, plan[i].start);
+    }
+    return { scores, masks };
+  }
+
+  foldOne(strings) {
+    const t0 = performance.now();
+    return this._post({ op: 'fold', strings }).then((r) => {
+      this.stats.foldCalls++;
+      this.stats.foldItems += strings.length;
+      this.stats.ms += performance.now() - t0;
+      return r.strings;
+    });
+  }
+
+  async fold(strings) {
+    const n = strings.length;
+    if (!n) return { strings: [], device: 'cpu-pool', shards: [] };
+    const nw = (n < CPU_FOLD_MIN || this.size <= 1)
+      ? 1
+      : Math.min(this.size, Math.ceil(n / CPU_FOLD_MIN));
+    if (nw === 1) {
+      const out = await this.foldOne(strings);
+      return { strings: out, device: 'cpu-pool', shards: [{ unit: 'cpu0', items: n }] };
+    }
+    const units = Array.from({ length: nw }, (_, i) => ({ id: `cpu${i}`, weight: 1 }));
+    const plan = shardByWeight(n, units, CPU_FOLD_MIN);
+    const parts = await Promise.all(plan.map((sh) => this.foldOne(strings.slice(sh.start, sh.end))));
+    return {
+      strings: [].concat(...parts),
+      device: 'cpu-pool',
+      shards: plan.map((sh) => ({ unit: sh.unit.id, items: sh.end - sh.start })),
+    };
   }
 }
 
@@ -626,7 +695,7 @@ function foldOnDevice(dev, strings) {
 }
 
 /* ------------------------------------------------------------------ */
-/* CPU fallbacks (same semantics as the WGSL kernels)                  */
+/* CPU twins of the WGSL kernels (also used by the worker pool)       */
 /* ------------------------------------------------------------------ */
 
 /** Per-doc scores/masks in input order (the shape the GPU/worker paths return). */
@@ -686,20 +755,18 @@ function tokensFor(query) {
 }
 
 /**
- * Rank candidates. Device policy:
- *   GPUs present  -> shard across all local GPU devices (weighted)
- *   no GPU, big   -> shard across the CPU worker pool
- *   no GPU, small -> main-thread JS
- * Returns { results: [{doc, score, mask}], device: 'gpu'|'cpu-pool'|'cpu', shards: [...] }
+ * Rank candidates.
+ * opts.units: 'gpu' | 'cpu' | 'all' (default 'all')
+ * Returns { results: [{doc, score, mask}], device, shards }
  */
-async function rank(candidates, query, topK = 50) {
+async function rank(candidates, query, topK = 50, opts = {}) {
   const tokens = tokensFor(query).filter(Boolean);
   if (!tokens.length || !candidates.length) return { results: [], device: 'none', shards: [] };
   const numDocs = candidates.length;
+  const unitsMode = (opts && opts.units) || 'all';
+  const gpuUnits = unitsMode === 'cpu' ? [] : gpuDevices.filter((d) => !d.lost);
+  const wantCpu = unitsMode !== 'gpu' && cpuPool && cpuPool.size > 0;
 
-  // Each shard runs on its unit; a shard whose unit fails (GPU validation
-  // error, lost device, dead worker) is recomputed on the main thread so the
-  // other units' work is kept. Resolves { results, device, shards }.
   const runSharded = async (units, deviceLabel, exec) => {
     const plan = shardByWeight(numDocs, units, MIN_SHARD_DOCS);
     const q = packStrings(tokens, MAX_FIELD_UNITS);
@@ -707,7 +774,7 @@ async function rank(candidates, query, topK = 50) {
     const parts = await Promise.all(plan.map(async (sh) => {
       const slice = candidates.slice(sh.start, sh.end);
       try {
-        return await exec(sh.unit, packDocs(slice), q);
+        return await exec(sh.unit, slice, q);
       } catch (err) {
         fellBack++;
         sh.fallback = true;
@@ -729,26 +796,57 @@ async function rank(candidates, query, topK = 50) {
     };
   };
 
-  if (gpuDevices.length) {
-    return runSharded(gpuDevices, 'gpu', (dev, packed, q) => rankPackedOnDevice(dev, packed, q, tokens.length));
+  if (unitsMode === 'gpu') {
+    if (!gpuUnits.length) throw new Error('no GPU adapter in this process');
+    return runSharded(gpuUnits, 'gpu', (dev, slice, q) => rankPackedOnDevice(dev, packDocs(slice), q, tokens.length));
   }
-  if (cpuPool && numDocs >= CPU_POOL_MIN_DOCS) {
-    const n = Math.min(cpuPool.size, Math.ceil(numDocs / MIN_SHARD_DOCS));
-    const units = Array.from({ length: n }, (_, i) => ({ id: `cpu${i}`, weight: 1 }));
-    return runSharded(units, 'cpu-pool', (unit, packed, q) => cpuPool.rank(packed, q, tokens.length));
+
+  if (unitsMode === 'cpu') {
+    if (wantCpu && numDocs >= CPU_WORKER_MIN) {
+      try {
+        const q = packStrings(tokens, MAX_FIELD_UNITS);
+        const { scores, masks } = await cpuPool.rankDocs(candidates, q, tokens.length);
+        const scored = candidates.map((doc, i) => ({ doc, score: scores[i], mask: masks[i] }));
+        scored.sort((a, b) => b.score - a.score);
+        return {
+          results: scored.filter((s) => s.score > 0).slice(0, topK),
+          device: 'cpu-pool',
+          shards: [{ unit: `cpu×${Math.min(cpuPool.size, Math.ceil(numDocs / CPU_WORKER_MIN))}`, docs: numDocs }],
+        };
+      } catch (err) {
+        console.warn('[rank] cpu pool failed:', err && err.message);
+      }
+    }
+    return { results: cpuRank(candidates, tokens, topK), device: 'cpu', shards: [{ unit: 'main-thread', docs: numDocs }] };
+  }
+
+  const units = [...gpuUnits];
+  if (wantCpu) units.push({ id: 'cpu', weight: cpuComputeWeight(cpuPool.size), _cpu: true });
+  if (units.length) {
+    const label = gpuUnits.length && wantCpu ? 'gpu+cpu' : gpuUnits.length ? 'gpu' : 'cpu-pool';
+    return runSharded(units, label, (unit, slice, q) => (
+      unit._cpu
+        ? cpuPool.rankDocs(slice, q, tokens.length)
+        : rankPackedOnDevice(unit, packDocs(slice), q, tokens.length)
+    ));
   }
   return { results: cpuRank(candidates, tokens, topK), device: 'cpu', shards: [{ unit: 'main-thread', docs: numDocs }] };
 }
 
-/** Fold a batch of strings: sharded across local GPU devices, else CPU (per-shard fallback). */
-async function normalizeBatch(strings) {
-  if (gpuDevices.length) {
-    const plan = shardByWeight(strings.length, gpuDevices, FOLD_SHARD_MIN);
+/** Fold a batch of strings. opts.units: 'gpu' | 'cpu' | 'all' (default 'all'). */
+async function normalizeBatch(strings, opts = {}) {
+  if (!strings || !strings.length) return { strings: strings || [], device: 'none', shards: [] };
+  const unitsMode = (opts && opts.units) || 'all';
+  const gpuUnits = unitsMode === 'cpu' ? [] : gpuDevices.filter((d) => !d.lost);
+  const wantCpu = unitsMode !== 'gpu' && cpuPool && cpuPool.size > 0;
+
+  const run = async (units, deviceLabel, exec) => {
+    const plan = shardByWeight(strings.length, units, FOLD_SHARD_MIN);
     let fellBack = 0;
     const parts = await Promise.all(plan.map(async (sh) => {
       const slice = strings.slice(sh.start, sh.end);
       try {
-        return await foldOnDevice(sh.unit, slice);
+        return await exec(sh.unit, slice);
       } catch (err) {
         fellBack++;
         sh.fallback = true;
@@ -759,9 +857,30 @@ async function normalizeBatch(strings) {
     const out = plan.length === 1 ? parts[0] : [].concat(...parts);
     return {
       strings: out,
-      device: fellBack === plan.length ? 'cpu' : fellBack ? 'gpu+cpu' : 'gpu',
+      device: fellBack === plan.length ? 'cpu' : fellBack ? `${deviceLabel}+cpu` : deviceLabel,
       shards: plan.map((sh) => ({ unit: sh.fallback ? `${sh.unit.id}->cpu` : sh.unit.id, items: sh.end - sh.start })),
     };
+  };
+
+  if (unitsMode === 'gpu') {
+    if (!gpuUnits.length) throw new Error('no GPU adapter in this process');
+    return run(gpuUnits, 'gpu', (dev, slice) => foldOnDevice(dev, slice));
+  }
+
+  if (unitsMode === 'cpu') {
+    if (wantCpu && strings.length >= CPU_FOLD_MIN) {
+      try { return await cpuPool.fold(strings); } catch (err) {
+        console.warn('[fold] cpu pool failed:', err && err.message);
+      }
+    }
+    return { strings: cpuFold(strings), device: 'cpu', shards: [{ unit: 'main-thread', items: strings.length }] };
+  }
+
+  const units = [...gpuUnits];
+  if (wantCpu) units.push({ id: 'cpu', weight: cpuComputeWeight(cpuPool.size), _cpu: true });
+  if (units.length) {
+    const label = gpuUnits.length && wantCpu ? 'gpu+cpu' : gpuUnits.length ? 'gpu' : 'cpu-pool';
+    return run(units, label, (unit, slice) => (unit._cpu ? cpuPool.foldOne(slice) : foldOnDevice(unit, slice)));
   }
   return { strings: cpuFold(strings), device: 'cpu', shards: [{ unit: 'main-thread', items: strings.length }] };
 }

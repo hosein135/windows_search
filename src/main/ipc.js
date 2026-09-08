@@ -4,10 +4,11 @@
  * IPC surface between the Node main process and the renderer.
  *
  * GPU work runs in Chromium renderers via WebGPU. The main window registers
- * itself as a GpuPool endpoint (gpu:state); helper processes register through
- * gpuHelpers.js. Importers ask the pool to fold text; the pool shards the
- * request over every GPU endpoint and returns null on failure, in which case
- * the importer folds on the CPU (buildPerson is idempotent).
+ * itself as a GpuPool GPU endpoint (gpu:state) and, separately, as a CPU
+ * endpoint (the same window's worker pool). Helper processes register through
+ * gpuHelpers.js. Importers ask the pool to fold text; search asks the pool
+ * to rank candidates. The pool shards both over every GPU + the CPU workers
+ * and returns null / CPU-rank on failure (buildPerson is idempotent).
  */
 
 const { ipcMain } = require('electron');
@@ -17,7 +18,7 @@ const db = require('./db');
 const { getHardware } = require('./hardware');
 const { scanCsvFiles, importFile, importAll } = require('./importer');
 const { parallelImport, DEFAULT_WORKERS, DEFAULT_INFLIGHT } = require('./parallelImporter');
-const { search } = require('./search');
+const { search, cpuRank } = require('./search');
 
 function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags }) {
   let importAbort = null;
@@ -47,7 +48,20 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
   ipcMain.on('gpu:state', (_e, state) => {
     if (!pool) return;
     pool.unregister('renderer');
+    pool.unregister('cpu');
     const primary = state && state.devices && state.devices[0];
+    const rendererSend = async (op, payload) => {
+      const out = await rendererOp(op, { ...payload, units: 'gpu' });
+      if (op === 'fold') {
+        // 'gpu' or 'gpu+cpu' (one local device fell back) are both real
+        // results; a pure CPU answer means this endpoint has no working GPU.
+        if (!out || !Array.isArray(out.strings) || !/^gpu/.test(String(out.device))) {
+          throw new Error(`renderer fold did not run on the GPU (${out && out.device})`);
+        }
+        return out.strings;
+      }
+      return out;
+    };
     pool.register({
       id: 'renderer',
       kind: 'renderer',
@@ -61,19 +75,25 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
         cpuWorkers: state ? state.cpuWorkers : 0, rejected: state ? state.rejected : [],
         forceHighPerformanceGpu: !!(gpuFlags && gpuFlags.forceHighPerformanceGpu),
       },
-      send: async (op, payload) => {
-        const out = await rendererOp(op, payload);
-        if (op === 'fold') {
-          // 'gpu' or 'gpu+cpu' (one local device fell back) are both real
-          // results; a pure CPU answer means this endpoint has no working GPU.
-          if (!out || !Array.isArray(out.strings) || !/^gpu/.test(String(out.device))) {
-            throw new Error(`renderer fold did not run on the GPU (${out && out.device})`);
-          }
-          return out.strings;
-        }
-        return out;
-      },
+      send: rendererSend,
     });
+    const cpuWorkers = state && state.cpuWorkers ? state.cpuWorkers : 0;
+    if (cpuWorkers > 0) {
+      pool.register({
+        id: 'cpu',
+        kind: 'cpu',
+        label: `CPU (${cpuWorkers} workers)`,
+        meta: { cpuWorkers, hardwareConcurrency: state.hardwareConcurrency || cpuWorkers },
+        send: async (op, payload) => {
+          const out = await rendererOp(op, { ...payload, units: 'cpu' });
+          if (op === 'fold') {
+            if (!out || !Array.isArray(out.strings)) throw new Error('cpu fold malformed');
+            return out.strings;
+          }
+          return out;
+        },
+      });
+    }
   });
 
   const gpuFoldBroker = pool ? (strings) => pool.fold(strings) : null;
@@ -143,9 +163,39 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       await db.connect();
       await db.ensureIndexes();
     } catch (err) {
-      return { error: `MongoDB not reachable: ${err.message}`, candidates: [], tookMs: 0 };
+      return { error: `MongoDB not reachable: ${err.message}`, candidates: [], candidateCount: 0, tookMs: 0 };
     }
-    return search(db.persons(), raw, { sourceId });
+    const mongo = await search(db.persons(), raw, { sourceId });
+    const tRank = process.hrtime.bigint();
+    let ranked;
+    try {
+      if (pool && typeof pool.rank === 'function') {
+        ranked = await pool.rank(mongo.candidates, mongo.query, 50);
+      } else {
+        ranked = {
+          results: cpuRank(mongo.candidates, mongo.query, 50),
+          device: 'cpu',
+          shards: [{ unit: 'main-thread', docs: mongo.candidates.length }],
+        };
+      }
+    } catch (err) {
+      ranked = {
+        results: cpuRank(mongo.candidates, mongo.query, 50),
+        device: 'cpu',
+        shards: [{ unit: 'main-thread', docs: mongo.candidates.length }],
+      };
+      ranked.error = err && err.message;
+    }
+    const rankMs = Number(process.hrtime.bigint() - tRank) / 1e6;
+    return {
+      query: mongo.query,
+      candidateCount: mongo.candidates.length,
+      tookMs: mongo.tookMs,
+      rankMs,
+      capped: mongo.capped,
+      sourceId: mongo.sourceId,
+      ranked,
+    };
   });
 
   /* ------------------------------ imports -------------------------------- */
@@ -175,7 +225,7 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
       mongoUrl: db.DEFAULT_URL,
       dbName: db.DB_NAME,
       collection: db.PERSONS_COLLECTION,
-      gpuFold: gpuNormalize && gpuFoldBroker ? gpuFoldBroker : null,
+      gpuFold: gpuNormalize && gpuFoldBroker && pool && pool.hasGpu() ? gpuFoldBroker : null,
       signal: importAbort.signal,
       onProgress: send,
     });
@@ -194,17 +244,17 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
     importAbort = new AbortController();
     try {
       if (parallel) {
-        // === PARALLEL MODE: every core parses a chunk + writes; GPU fold sharded over the pool ===
+        // === PARALLEL MODE: every core parses a chunk + writes; fold sharded over GPUs + CPU ===
         const totals = await runParallel({ files, gpuNormalize, workers, inflight, send });
         return { ok: true, totals, cancelled: importAbort.signal.aborted, mode: 'parallel' };
       }
-      // === SEQUENTIAL MODE: one thread, pipelined writes, optional GPU fold ===
+      // === SEQUENTIAL MODE: one thread, pipelined writes, optional GPU+CPU fold ===
       const totals = await importAll(databasesDir, {
         col: db.persons(),
         only: files && files.length ? files : null,
         inflight: inflight || DEFAULT_INFLIGHT,
         signal: importAbort.signal,
-        gpuFold: gpuNormalize && gpuFoldBroker ? gpuFoldBroker : null,
+        gpuFold: gpuNormalize && gpuFoldBroker && pool && pool.hasGpu() ? gpuFoldBroker : null,
         onProgress: send,
       });
       return { ok: true, totals, cancelled: importAbort.signal.aborted, mode: 'sequential' };
@@ -239,7 +289,7 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
         col: db.persons(),
         inflight: inflight || DEFAULT_INFLIGHT,
         signal: importAbort.signal,
-        gpuFold: gpuNormalize && gpuFoldBroker ? gpuFoldBroker : null,
+        gpuFold: gpuNormalize && gpuFoldBroker && pool && pool.hasGpu() ? gpuFoldBroker : null,
         onProgress: send,
       });
       return { ok: true, stats, cancelled: importAbort.signal.aborted, mode: 'sequential' };

@@ -11,7 +11,7 @@
  *     --force-high-performance-gpu so the main window lands on the discrete GPU.
  *   - Every additional adapter gets its own hidden helper Electron process,
  *     pinned with --use-adapter-luid (see gpuHelpers.js). The GpuPool shards
- *     GPU work across the main window + helpers.
+ *     GPU work AND CPU-worker work across the main window + helpers + CPU.
  *
  * Flags (also as env vars):
  *   --gpu-unsafe           WS_GPU_UNSAFE=1          bypass the WebGPU adapter blocklist

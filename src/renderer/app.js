@@ -151,7 +151,7 @@
         const st = d.stats || {};
         rows.push(['GPU (this window)' + (local.devices.length > 1 ? ` #${i + 1}` : ''),
           adapterLine(d, ` <small>[${esc(d.kind)}, weight ${d.weight}, via ${esc(d.via)}]</small>`
-            + `<br><small>ranks search results + folds import text; ${st.rankCalls || 0} rank call(s) / ${(st.rankDocs || 0).toLocaleString()} docs, `
+            + `<br><small>search rank + import fold, sharded with helper GPUs and CPU workers; ${st.rankCalls || 0} rank call(s) / ${(st.rankDocs || 0).toLocaleString()} docs, `
             + `${st.foldCalls || 0} fold call(s)${d.maxStorageBindingMB ? `; max storage binding ${d.maxStorageBindingMB} MB` : ''}</small>`)]);
       });
     } else {
@@ -160,14 +160,22 @@
     for (const r of local.rejected || []) {
       rows.push(['GPU adapter skipped', adapterLine(r, ` <small>${esc(r.reason)}</small>`)]);
     }
-    // 2. helper GPU processes (other adapters)
+    // 2. helper GPU processes (other adapters) + CPU pool endpoint
     const helperEps = pool.endpoints.filter((e) => e.kind === 'helper');
     for (const e of helperEps) {
       const ok = e.status === 'active';
       rows.push([esc(e.label), adapterLine(e.adapter,
         ` <span class="badge ${ok ? 'badge-ok' : 'badge-warn'}">${esc(e.status)}</span>`
         + `<small>${e.meta && e.meta.luid ? `pinned --use-adapter-luid ${esc(e.meta.luid)}; ` : ''}`
-        + `${ok ? `weight ${e.weight}; ${e.stats.calls} fold call(s), ${e.stats.items.toLocaleString()} strings` : esc(e.reason || '')}</small>`)]);
+        + `${ok ? `weight ${e.weight}; ${e.stats.calls} call(s), ${e.stats.items.toLocaleString()} items` : esc(e.reason || '')}</small>`)]);
+    }
+    const cpuEps = pool.endpoints.filter((e) => e.kind === 'cpu');
+    for (const e of cpuEps) {
+      const ok = e.status === 'active';
+      rows.push([esc(e.label),
+        `<span class="badge ${ok ? 'badge-ok' : 'badge-warn'}">${esc(e.status)}</span>`
+        + ` <small>weight ${e.weight}; ${e.stats.calls} call(s), ${e.stats.items.toLocaleString()} items`
+        + `${e.meta && e.meta.cpuWorkers ? `; ${e.meta.cpuWorkers} workers` : ''}</small>`]);
     }
     if (helpers) {
       for (const h of helpers.helpers || []) {
@@ -182,10 +190,12 @@
       }
     }
     // 3. sharding + CPU
-    rows.push(['GPU fold sharding', `<small>${esc(pool.sharding)} - ${pool.activeCount} active GPU process(es)</small>`]);
-    rows.push(['CPU (this window)', `<small>${local.hardwareConcurrency || '?'} logical threads; ${local.cpuWorkers || 0} rank worker(s) `
-      + `${local.devices && local.devices.length ? '(idle while a GPU ranks; take over on GPU failure)' : '(active ranker: sharded by document range for large candidate sets)'}`
-      + `${local.cpuPoolStats ? `; ${local.cpuPoolStats.calls} call(s) / ${(local.cpuPoolStats.docs || 0).toLocaleString()} docs` : ''}</small>`]);
+    rows.push(['Compute sharding', `<small>${esc(pool.sharding)} - ${pool.gpuCount || 0} GPU process(es)`
+      + `${pool.cpuActive ? ' + CPU workers' : ''} (${pool.activeCount || 0} endpoint(s))</small>`]);
+    rows.push(['CPU (this window)', `<small>${local.hardwareConcurrency || '?'} logical threads; ${local.cpuWorkers || 0} compute worker(s) `
+      + `${pool.cpuActive ? '(active: rank + fold shards in parallel with every GPU)' : (local.devices && local.devices.length ? '(GPU endpoint only; CPU workers not registered)' : '(active ranker: sharded by document range)')}`
+      + `${local.cpuPoolStats ? `; ${local.cpuPoolStats.calls} rank call(s) / ${(local.cpuPoolStats.docs || 0).toLocaleString()} docs`
+        + `${local.cpuPoolStats.foldCalls ? `; ${local.cpuPoolStats.foldCalls} fold call(s) / ${(local.cpuPoolStats.foldItems || 0).toLocaleString()} strings` : ''}` : ''}</small>`]);
     rows.push(['CPU (import)', `<small>${hwCache ? `${hwCache.plan.importWorkers} worker threads (one per logical CPU), byte-range chunked files, direct MongoDB writes, ${hwCache.plan.inflightWritesPerWorker} in flight each` : '...'}</small>`]);
     rows.push(['Chromium switches', `<small>${flags.forceHighPerformanceGpu ? '--force-high-performance-gpu ' : ''}${flags.unsafe ? '--enable-unsafe-webgpu --ignore-gpu-blocklist ' : ''}${flags.allowSoftware ? '--enable-unsafe-swiftshader ' : ''}`
       + `${flags.helpersDisabled ? '--no-gpu-helpers ' : ''}${flags.helpersForced ? `--gpu-helpers=${flags.helpersForced}` : ''}</small>`]);
@@ -223,14 +233,20 @@
     const chip = $('#chip-gpu');
     const st = window.GpuRank.state() || {};
     const helpersActive = lastPlan && lastPlan.pool ? lastPlan.pool.endpoints.filter((e) => e.kind === 'helper' && e.status === 'active').length : 0;
+    const cpuActive = lastPlan && lastPlan.pool ? lastPlan.pool.cpuActive : false;
     if (st.ok && st.devices.length) {
       const names = st.devices.map((d) => d.vendor || d.architecture || 'gpu');
-      chip.textContent = `GPU: ${names.join(' + ')}${helpersActive ? ` + ${helpersActive} helper GPU` : ''}`;
+      chip.textContent = `GPU: ${names.join(' + ')}${helpersActive ? ` + ${helpersActive} helper` : ''}${cpuActive ? ' + CPU' : ''}`;
       chip.className = 'chip chip-ok';
       chip.title = st.devices.map((d) => `${d.vendor} ${d.architecture} ${d.description || ''} [${d.kind}]`).join('\n')
-        + (helpersActive ? `\n+${helpersActive} pinned helper process(es)` : '');
+        + (helpersActive ? `\n+${helpersActive} pinned helper process(es)` : '')
+        + (cpuActive ? '\n+CPU worker pool (parallel with GPUs)' : '');
+    } else if (cpuActive || (st.cpuWorkers || 0) > 0) {
+      chip.textContent = `GPU: CPU workers (${st.cpuWorkers || 0})`;
+      chip.className = 'chip chip-warn';
+      chip.title = st.reason || 'WebGPU unavailable; ranking and fold use the CPU pool';
     } else {
-      chip.textContent = `GPU: CPU fallback (${st.cpuWorkers || 0} workers)`;
+      chip.textContent = 'GPU: none';
       chip.className = 'chip chip-warn';
       chip.title = st.reason || 'WebGPU unavailable';
     }
@@ -314,8 +330,13 @@
       }
       updateBusyMessage('Ranking results…');
       const t1 = performance.now();
-      const ranked = await window.GpuRank.rank(res.candidates, res.query, 50);
+      let ranked = res.ranked;
+      if (!ranked || !Array.isArray(ranked.results)) {
+        ranked = await window.GpuRank.rank(res.candidates || [], res.query, 50, { units: 'all' });
+      }
       const t2 = performance.now();
+      const rankMs = res.rankMs != null ? res.rankMs : (t2 - t1);
+      const nCand = res.candidateCount != null ? res.candidateCount : (res.candidates || []).length;
 
       const shards = ranked.shards && ranked.shards.length > 1
         ? ` across ${ranked.shards.length} shards (${ranked.shards.map((s) => `${s.unit}:${s.docs}`).join(', ')})`
@@ -324,8 +345,8 @@
         ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.replace(/\s*\([\d,]+\)$/, '')}`
         : '';
       $('#search-meta').textContent =
-        `${res.candidates.length} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +
-        ` (query ${(t1 - t0).toFixed(0)} ms) - ranked on ${ranked.device.toUpperCase()}${shards} in ${(t2 - t1).toFixed(1)} ms` +
+        `${nCand} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +
+        ` (round-trip ${(t1 - t0).toFixed(0)} ms) - ranked on ${String(ranked.device || 'cpu').toUpperCase()}${shards} in ${rankMs.toFixed(1)} ms` +
         `${res.capped ? ' - candidate cap reached, refine the query' : ''}` +
         ` - ${ranked.results.length} shown`;
 
@@ -382,12 +403,18 @@
 
   function renderImportPlan() {
     const o = importOptions();
-    const gpuEps = lastPlan && lastPlan.pool ? lastPlan.pool.activeCount : (window.GpuRank.gpuAvailable() ? 1 : 0);
+    const gpuEps = lastPlan && lastPlan.pool ? (lastPlan.pool.gpuCount || 0) : (window.GpuRank.gpuAvailable() ? 1 : 0);
+    const cpuOn = lastPlan && lastPlan.pool ? lastPlan.pool.cpuActive : (window.GpuRank.state() || {}).cpuWorkers > 0;
     const threads = hwCache ? hwCache.cpu.threads : '?';
+    const foldBit = o.gpuNormalize
+      ? (gpuEps
+        ? `text folded on ${gpuEps} GPU process(es)${cpuOn ? ' + CPU workers' : ''}, sharded by weight`
+        : (cpuOn ? 'CPU worker fold (no GPU endpoint)' : 'CPU fold in import threads'))
+      : 'CPU fold in import threads';
     $('#import-plan').textContent = o.parallel
       ? `Plan: ${o.workers} worker thread(s) of ${threads} logical CPUs, each parsing its own byte-range chunk and writing to MongoDB with ${o.inflight} bulkWrites in flight `
-        + `(${o.workers * o.inflight} concurrent) - ${o.gpuNormalize ? (gpuEps ? `text folded on ${gpuEps} GPU process(es), sharded by weight` : 'GPU fold requested but no GPU endpoint - CPU fold') : 'CPU fold'}.`
-      : `Plan: sequential - 1 thread, ${o.inflight} bulkWrites in flight, ${o.gpuNormalize && gpuEps ? `GPU fold on ${gpuEps} GPU process(es)` : 'CPU fold'}. Enable parallel import to use all ${threads} threads.`;
+        + `(${o.workers * o.inflight} concurrent) - ${foldBit}.`
+      : `Plan: sequential - 1 thread, ${o.inflight} bulkWrites in flight, ${foldBit}. Enable parallel import to use all ${threads} threads.`;
     $('#workers-label').style.display = o.parallel ? 'flex' : 'none';
   }
 
@@ -677,9 +704,11 @@
 
   // GPU ops requested by the main process (fold for the importers, rank/state for diagnostics).
   window.api.onGpuOp(async (op, payload) => {
+    payload = payload || {};
+    const units = payload.units || 'gpu';
     switch (op) {
-      case 'fold': return window.GpuRank.normalizeBatch(payload.strings || []);
-      case 'rank': return window.GpuRank.rank(payload.candidates || [], payload.query, payload.topK || 50);
+      case 'fold': return window.GpuRank.normalizeBatch(payload.strings || [], { units });
+      case 'rank': return window.GpuRank.rank(payload.candidates || [], payload.query, payload.topK || 50, { units });
       case 'state': return window.GpuRank.state();
       default: throw new Error(`unknown gpu op ${op}`);
     }

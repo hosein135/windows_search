@@ -12,7 +12,7 @@
     <div class="chips">
       <span id="chip-mongo" class="chip chip-warn" title="MongoDB status">MongoDB: ...</span>
       <span id="chip-gpu" class="chip chip-warn" title="Ranking device">GPU: ...</span>
-      <span id="chip-cpu" class="chip" title="CPU">CPU</span>
+      <span id="chip-cpu" class="chip" title="CPU workers run in parallel with GPUs for rank and fold">CPU</span>
     </div>
   </header>
 
@@ -56,7 +56,7 @@
     <div class="import-controls">
       <label class="gpu-toggle">
         <input type="checkbox" id="chk-gpu-normalize" checked />
-        GPU text normalization (WebGPU)
+        GPU + CPU text fold (all GPUs + workers)
       </label>
       <label class="gpu-toggle" title="One worker thread per logical CPU; big files are split into byte-range chunks so every core works on them; each worker writes to MongoDB directly.">
         <input type="checkbox" id="chk-parallel" checked />

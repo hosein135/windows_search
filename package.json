@@ -2,7 +2,7 @@
   "name": "windows-search",
   "version": "0.1.0",
   "private": true,
-  "description": "Demo Windows GUI search app: Bun CLI + Electron GUI, MongoDB storage, GPU-accelerated ranking via WebGPU across every GPU process (CPU worker-pool fallback), all-core chunked parallel import",
+  "description": "Demo Windows GUI search app: Bun CLI + Electron GUI, MongoDB storage, GPU+CPU ranking and import fold across every GPU process and the CPU worker pool, all-core chunked parallel import",
   "main": "src/main/main.js",
   "scripts": {
     "start": "electron .",
