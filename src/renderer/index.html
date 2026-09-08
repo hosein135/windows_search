@@ -35,15 +35,19 @@
       <span id="query-type" class="chip">type: -</span>
     </div>
     <div id="search-meta" class="muted">Enter a query and click Search. Optionally pick one imported database.</div>
-    <table id="results" class="results">
-      <thead>
-        <tr>
-          <th>#</th><th>Score</th><th>Full name</th><th>National code</th>
-          <th>Mobile</th><th>Card(s)</th><th>City / Province</th><th>Address</th><th>Sources</th>
-        </tr>
-      </thead>
-      <tbody id="results-body"></tbody>
-    </table>
+    <div class="results-wrap">
+      <table id="results" class="results">
+        <thead>
+          <tr>
+            <th>#</th><th>Score</th><th>Full name</th><th>National code</th>
+            <th>Mobile</th><th>Card(s)</th>
+            <th>City</th><th>Province</th><th>Birth city</th><th>Birth province</th>
+            <th>Address</th><th>Sources</th>
+          </tr>
+        </thead>
+        <tbody id="results-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <!-- ============================ IMPORT ============================ -->
@@ -93,6 +97,14 @@
     <h3>Pipeline involvement (who does what, and why the rest are skipped)</h3>
     <div id="hw-involvement" class="hw-block"></div>
   </section>
+
+  <div id="busy-overlay" class="busy-overlay hidden" aria-hidden="true" role="alertdialog" aria-live="assertive" aria-busy="true">
+    <div class="busy-dialog">
+      <div class="busy-spinner" aria-hidden="true"></div>
+      <div id="busy-message" class="busy-message">Working…</div>
+      <button type="button" id="busy-cancel" class="busy-cancel hidden">Cancel</button>
+    </div>
+  </div>
 
   <script src="gpuRank.js"></script>
   <script src="app.js"></script>

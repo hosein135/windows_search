@@ -6,6 +6,70 @@
   const $ = (sel) => document.querySelector(sel);
   let filesCache = [];
 
+  /* ----------------------- busy overlay / lock UI ---------------------- */
+  let busyDepth = 0;
+  let busyCancelHandler = null;
+
+  function setBusy(message, { cancellable = false, onCancel = null } = {}) {
+    busyDepth++;
+    const overlay = $('#busy-overlay');
+    const msg = $('#busy-message');
+    const cancelBtn = $('#busy-cancel');
+    if (msg) msg.textContent = message || 'Working…';
+    if (cancelBtn) {
+      if (cancellable) {
+        cancelBtn.classList.remove('hidden');
+        busyCancelHandler = typeof onCancel === 'function' ? onCancel : null;
+      } else {
+        cancelBtn.classList.add('hidden');
+        busyCancelHandler = null;
+      }
+    }
+    if (overlay) {
+      overlay.classList.remove('hidden');
+      overlay.setAttribute('aria-hidden', 'false');
+    }
+    document.body.classList.add('is-busy');
+  }
+
+  function updateBusyMessage(message) {
+    if (busyDepth > 0 && message) {
+      const msg = $('#busy-message');
+      if (msg) msg.textContent = message;
+    }
+  }
+
+  function clearBusy() {
+    busyDepth = Math.max(0, busyDepth - 1);
+    if (busyDepth > 0) return;
+    const overlay = $('#busy-overlay');
+    const cancelBtn = $('#busy-cancel');
+    if (overlay) {
+      overlay.classList.add('hidden');
+      overlay.setAttribute('aria-hidden', 'true');
+    }
+    if (cancelBtn) cancelBtn.classList.add('hidden');
+    busyCancelHandler = null;
+    document.body.classList.remove('is-busy');
+  }
+
+  /** Show blocking overlay while fn runs. Buttons under the overlay cannot be clicked. */
+  async function withBusy(message, fn, opts = {}) {
+    setBusy(message, opts);
+    try {
+      return await fn();
+    } finally {
+      clearBusy();
+    }
+  }
+
+  const busyCancelEl = $('#busy-cancel');
+  if (busyCancelEl) {
+    busyCancelEl.addEventListener('click', () => {
+      if (busyCancelHandler) busyCancelHandler();
+    });
+  }
+
   /* ----------------------------- tabs ----------------------------- */
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -131,7 +195,13 @@
     renderGpuChip();
   }
 
-  $('#btn-hw-refresh').addEventListener('click', () => renderHardware(true));
+  $('#btn-hw-refresh').addEventListener('click', () => {
+    if (busyDepth > 0) return;
+    $('#btn-hw-refresh').disabled = true;
+    withBusy('Detecting hardware…', () => renderHardware(true))
+      .catch(() => {})
+      .finally(() => { $('#btn-hw-refresh').disabled = false; });
+  });
   window.api.onGpuPlanChange((plan) => { renderComputePlan(plan).catch(() => {}); });
 
   /* ------------------------- status chips -------------------------- */
@@ -229,46 +299,57 @@
       $('#search-meta').textContent = 'Enter a query and click Search. Optionally pick one imported database.';
       return;
     }
-    const mySeq = ++searchSeq;
-    const t0 = performance.now();
-    const res = await window.api.search(q, sourceId ? { sourceId } : {});
-    if (mySeq !== searchSeq) return; // stale
-    if (res.error) {
-      $('#search-meta').textContent = res.error;
-      $('#results-body').innerHTML = '';
-      return;
-    }
-    const t1 = performance.now();
-    const ranked = await window.GpuRank.rank(res.candidates, res.query, 50);
-    const t2 = performance.now();
+    if (busyDepth > 0) return;
 
-    const shards = ranked.shards && ranked.shards.length > 1
-      ? ` across ${ranked.shards.length} shards (${ranked.shards.map((s) => `${s.unit}:${s.docs}`).join(', ')})`
-      : '';
-    const scope = sourceId
-      ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.replace(/\s*\([\d,]+\)$/, '')}`
-      : '';
-    $('#search-meta').textContent =
-      `${res.candidates.length} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +
-      ` (query ${(t1 - t0).toFixed(0)} ms) - ranked on ${ranked.device.toUpperCase()}${shards} in ${(t2 - t1).toFixed(1)} ms` +
-      `${res.capped ? ' - candidate cap reached, refine the query' : ''}` +
-      ` - ${ranked.results.length} shown`;
+    searchBtn.disabled = true;
+    await withBusy('Searching…', async () => {
+      const mySeq = ++searchSeq;
+      const t0 = performance.now();
+      const res = await window.api.search(q, sourceId ? { sourceId } : {});
+      if (mySeq !== searchSeq) return; // stale
+      if (res.error) {
+        $('#search-meta').textContent = res.error;
+        $('#results-body').innerHTML = '';
+        return;
+      }
+      updateBusyMessage('Ranking results…');
+      const t1 = performance.now();
+      const ranked = await window.GpuRank.rank(res.candidates, res.query, 50);
+      const t2 = performance.now();
 
-    $('#results-body').innerHTML = ranked.results.map((r, i) => {
-      const d = r.doc;
-      const m = r.mask || 0;
-      return `<tr>
+      const shards = ranked.shards && ranked.shards.length > 1
+        ? ` across ${ranked.shards.length} shards (${ranked.shards.map((s) => `${s.unit}:${s.docs}`).join(', ')})`
+        : '';
+      const scope = sourceId
+        ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.replace(/\s*\([\d,]+\)$/, '')}`
+        : '';
+      $('#search-meta').textContent =
+        `${res.candidates.length} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +
+        ` (query ${(t1 - t0).toFixed(0)} ms) - ranked on ${ranked.device.toUpperCase()}${shards} in ${(t2 - t1).toFixed(1)} ms` +
+        `${res.capped ? ' - candidate cap reached, refine the query' : ''}` +
+        ` - ${ranked.results.length} shown`;
+
+      $('#results-body').innerHTML = ranked.results.map((r, i) => {
+        const d = r.doc;
+        const m = r.mask || 0;
+        return `<tr>
         <td>${i + 1}</td>
         <td>${r.score}</td>
         <td>${hl(d.fullName || '', m & FIELD_BIT.searchName)}</td>
         <td>${hl(d.nationalCode || '', m & FIELD_BIT.nationalCode)}</td>
         <td>${hl((d.mobiles || []).join(', '), m & FIELD_BIT.mobile)}</td>
         <td>${hl((d.cards || []).join(', '), m & FIELD_BIT.card)}</td>
-        <td dir="auto">${esc([d.city, d.province].filter(Boolean).join(' / '))}</td>
-        <td dir="auto">${esc((d.addresses || [])[0] || '')}</td>
+        <td dir="auto">${esc(d.city || '')}</td>
+        <td dir="auto">${esc(d.province || '')}</td>
+        <td dir="auto">${esc(d.birthCity || '')}</td>
+        <td dir="auto">${esc(d.birthProvince || '')}</td>
+        <td dir="auto" class="addr">${esc((d.addresses || [])[0] || '')}</td>
         <td class="muted">${esc((d.sources || []).join(', '))}</td>
       </tr>`;
-    }).join('');
+      }).join('');
+    }).finally(() => {
+      searchBtn.disabled = false;
+    });
   }
 
   // Query-type chip updates as you type; search only runs on button / Enter.
@@ -397,24 +478,32 @@
   }
 
   $('#btn-import').addEventListener('click', async () => {
+    if (busyDepth > 0) return;
     const selected = [...document.querySelectorAll('.file-chk:checked')]
       .map((c) => filesCache[Number(c.dataset.i)].path);
     if (!selected.length) return;
     const opts = importOptions();
     $('#btn-import').disabled = true;
     $('#btn-cancel').disabled = false;
-    // Disable all per-file buttons during batch import
     document.querySelectorAll('.btn-import-one').forEach((b) => { b.disabled = true; });
-    const res = await window.api.startImport({ files: selected, ...opts });
+
+    const res = await withBusy(
+      `Importing ${selected.length} file(s)…`,
+      () => window.api.startImport({ files: selected, ...opts }),
+      { cancellable: true, onCancel: () => window.api.cancelImport() },
+    );
+
     $('#btn-import').disabled = false;
     $('#btn-cancel').disabled = true;
     document.querySelectorAll('.btn-import-one').forEach((b) => { b.disabled = false; });
     if (res.error) $('#import-summary').textContent = res.error;
     else $('#import-summary').textContent = describeTotals(res, 'Import');
     refreshStatus();
-    refreshStorage();
-    renderComputePlan().catch(() => {});
-    await scanFiles(); // refresh imported / pending State from MongoDB
+    await withBusy('Refreshing file list…', async () => {
+      refreshStorage().catch(() => {});
+      await renderComputePlan().catch(() => {});
+      await scanFiles();
+    });
   });
 
   for (const id of ['#chk-parallel', '#workers-count', '#inflight-count', '#chk-gpu-normalize']) {
@@ -423,10 +512,10 @@
   }
 
   async function importOneFile(i) {
+    if (busyDepth > 0) return;
     const f = filesCache[i];
     if (!f || !f.known) return;
     const opts = importOptions();
-    // Disable buttons during single-file import
     const btn = document.querySelector(`.btn-import-one[data-i="${i}"]`);
     if (btn) btn.disabled = true;
     $('#btn-import').disabled = true;
@@ -435,7 +524,11 @@
       .find((tr) => tr.dataset.path === f.path);
     if (row) row.querySelector('.c-state').textContent = 'importing...';
 
-    const res = await window.api.importFile({ file: f, ...opts });
+    const res = await withBusy(
+      `Importing ${f.name}…`,
+      () => window.api.importFile({ file: f, ...opts }),
+      { cancellable: true, onCancel: () => window.api.cancelImport() },
+    );
 
     if (btn) btn.disabled = false;
     $('#btn-import').disabled = false;
@@ -451,8 +544,10 @@
         `${res.mode === 'parallel' ? ` [parallel: ${res.totals.workers} workers, ${res.totals.tasks} chunk(s)]` : ' [sequential]'}.`;
     }
     refreshStatus();
-    refreshStorage();
-    await scanFiles(); // mark this file as imported in State
+    await withBusy('Refreshing file list…', async () => {
+      refreshStorage().catch(() => {});
+      await scanFiles();
+    });
   }
 
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
@@ -553,15 +648,28 @@
       </div>`;
   }
 
-  $('#btn-storage-refresh').addEventListener('click', refreshStorage);
+  $('#btn-storage-refresh').addEventListener('click', () => {
+    if (busyDepth > 0) return;
+    $('#btn-storage-refresh').disabled = true;
+    withBusy('Loading storage info…', () => refreshStorage())
+      .finally(() => { $('#btn-storage-refresh').disabled = false; });
+  });
 
   window.api.onImportProgress((p) => {
     if (p.phase === 'all-done') { $('#import-bar').style.width = '100%'; return; }
     if (p.phase === 'plan') {
       $('#import-plan').textContent = `Running: ${p.workers} worker(s), ${p.tasks} chunk task(s) over ${p.files} file(s), chunk ${fmtSize(p.chunkBytes)}, ${p.inflight} in-flight writes each, GPU fold ${p.gpuFold ? 'on' : 'off'}.`;
+      updateBusyMessage(`Importing…\n${p.files} file(s), ${p.workers} worker(s)`);
       return;
     }
-    if (p.file) updateFileRow(p.file, p);
+    if (p.file) {
+      updateFileRow(p.file, p);
+      const pct = p.bytesTotal ? Math.min(100, Math.round((100 * (p.bytes || 0)) / p.bytesTotal)) : null;
+      const line = p.phase === 'file-done'
+        ? `Finished ${p.file}`
+        : `Importing ${p.file}${pct != null ? ` (${pct}%)` : ''}…`;
+      updateBusyMessage(line);
+    }
     if (p.bytesTotal) $('#import-bar').style.width = `${Math.min(100, (100 * p.bytes) / p.bytesTotal)}%`;
   });
 
@@ -584,18 +692,23 @@
 
   /* ----------------------------- init ------------------------------ */
   (async function init() {
-    const flags = (await window.api.getGpuFlags().catch(() => null)) || {};
-    // Start disk scan immediately so Search/Import UI populate without waiting on hardware
-    const scanPromise = scanFiles().catch((err) => console.warn('[scan]', err));
-    await window.GpuRank.initGpu({ allowSoftware: !!flags.allowSoftware });
-    window.api.reportGpuState(window.GpuRank.state());
-    renderGpuChip();
-    await Promise.all([
-      renderHardware(false).catch(() => {}),
-      refreshStatus().catch(() => {}),
-      scanPromise,
-    ]);
-    refreshStorage().catch(() => {});
+    await withBusy('Starting…', async () => {
+      const flags = (await window.api.getGpuFlags().catch(() => null)) || {};
+      updateBusyMessage('Loading databases…');
+      const scanPromise = scanFiles().catch((err) => console.warn('[scan]', err));
+      updateBusyMessage('Initializing GPU…');
+      await window.GpuRank.initGpu({ allowSoftware: !!flags.allowSoftware });
+      window.api.reportGpuState(window.GpuRank.state());
+      renderGpuChip();
+      updateBusyMessage('Detecting hardware…');
+      await Promise.all([
+        renderHardware(false).catch(() => {}),
+        refreshStatus().catch(() => {}),
+        scanPromise,
+      ]);
+      updateBusyMessage('Loading storage info…');
+      await refreshStorage().catch(() => {});
+    });
     setInterval(refreshStatus, 15_000);
   })();
 })();
