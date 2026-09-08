@@ -64,15 +64,30 @@ function buildFilter(query) {
   }
 }
 
+/** Restrict candidates to persons tagged with a given import source id (prefix of sources tags). */
+function withSourceFilter(filter, sourceId) {
+  const id = String(sourceId || '').trim();
+  if (!id || !filter) return filter;
+  return {
+    $and: [
+      filter,
+      { sources: { $regex: `^${escapeRegex(id)}:` } },
+    ],
+  };
+}
+
 /**
  * Run the Mongo side of a search.
- * Returns { query, candidates, tookMs, capped }.
+ * Returns { query, candidates, tookMs, capped, sourceId }.
+ * @param {string} [opts.sourceId] - when set, only persons from that imported database
  */
-async function search(col, raw, { limit = DEFAULT_LIMIT } = {}) {
+async function search(col, raw, { limit = DEFAULT_LIMIT, sourceId = null } = {}) {
   const query = classifyQuery(raw);
-  if (query.type === 'empty') return { query, candidates: [], tookMs: 0, capped: false };
+  if (query.type === 'empty') {
+    return { query, candidates: [], tookMs: 0, capped: false, sourceId: sourceId || null };
+  }
 
-  const filter = buildFilter(query);
+  const filter = withSourceFilter(buildFilter(query), sourceId);
   const started = process.hrtime.bigint();
 
   const cap = query.type === 'name' ? NAME_CANDIDATE_CAP : limit;
@@ -82,7 +97,7 @@ async function search(col, raw, { limit = DEFAULT_LIMIT } = {}) {
     .toArray();
 
   const tookMs = Number(process.hrtime.bigint() - started) / 1e6;
-  return { query, candidates, tookMs, capped: candidates.length >= cap };
+  return { query, candidates, tookMs, capped: candidates.length >= cap, sourceId: sourceId || null };
 }
 
 /**
@@ -129,4 +144,6 @@ function cpuRank(candidates, query, topK = 50) {
   return scored.filter((s) => s.score > 0).slice(0, topK);
 }
 
-module.exports = { classifyQuery, buildFilter, search, cpuRank, scoreDoc, FIELD_WEIGHTS };
+module.exports = {
+  classifyQuery, buildFilter, withSourceFilter, search, cpuRank, scoreDoc, FIELD_WEIGHTS,
+};

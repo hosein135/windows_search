@@ -26,11 +26,15 @@
   <!-- ============================ SEARCH ============================ -->
   <section id="tab-search" class="tab-page active">
     <div class="search-row">
+      <select id="search-database" title="Limit search to one imported database">
+        <option value="">All databases</option>
+      </select>
       <input id="search-input" type="text" autofocus
              placeholder="Name, national code (10 digits), mobile (09...), card (16 digits)..." />
+      <button id="btn-search" class="primary">Search</button>
       <span id="query-type" class="chip">type: -</span>
     </div>
-    <div id="search-meta" class="muted">Enter a query. MongoDB narrows candidates, the GPU ranks them.</div>
+    <div id="search-meta" class="muted">Enter a query and click Search. Optionally pick one imported database.</div>
     <table id="results" class="results">
       <thead>
         <tr>

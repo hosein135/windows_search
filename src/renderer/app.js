@@ -11,6 +11,7 @@
       document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b === btn));
       document.querySelectorAll('.tab-page').forEach((p) =>
         p.classList.toggle('active', p.id === `tab-${btn.dataset.tab}`));
+      if (btn.dataset.tab === 'search') refreshDatabaseSelector().catch(() => {});
     });
   });
 
@@ -164,7 +165,8 @@
 
   /* ---------------------------- search ----------------------------- */
   const input = $('#search-input');
-  let debounce = null;
+  const dbSelect = $('#search-database');
+  const searchBtn = $('#btn-search');
   let searchSeq = 0;
 
   function classifyPreview(q) {
@@ -181,17 +183,29 @@
   const FIELD_BIT = { searchName: 1, nationalCode: 2, mobile: 4, card: 8 };
   const hl = (text, on) => `<span class="${on ? 'hit' : ''}" dir="auto">${esc(text)}</span>`;
 
+  async function refreshDatabaseSelector() {
+    const prev = dbSelect.value;
+    const res = await window.api.importedDatabases().catch(() => ({ ok: false, databases: [] }));
+    const dbs = (res && res.databases) || [];
+    const options = [`<option value="">All databases</option>`]
+      .concat(dbs.map((d) =>
+        `<option value="${esc(d.id)}">${esc(d.label)} (${d.persons.toLocaleString()})</option>`));
+    dbSelect.innerHTML = options.join('');
+    if (prev && dbs.some((d) => d.id === prev)) dbSelect.value = prev;
+  }
+
   async function runSearch() {
     const q = input.value;
+    const sourceId = dbSelect.value || null;
     $('#query-type').textContent = `type: ${classifyPreview(q)}`;
     if (!q.trim()) {
       $('#results-body').innerHTML = '';
-      $('#search-meta').textContent = 'Enter a query. MongoDB narrows candidates, the GPU ranks them.';
+      $('#search-meta').textContent = 'Enter a query and click Search. Optionally pick one imported database.';
       return;
     }
     const mySeq = ++searchSeq;
     const t0 = performance.now();
-    const res = await window.api.search(q);
+    const res = await window.api.search(q, sourceId ? { sourceId } : {});
     if (mySeq !== searchSeq) return; // stale
     if (res.error) {
       $('#search-meta').textContent = res.error;
@@ -205,8 +219,11 @@
     const shards = ranked.shards && ranked.shards.length > 1
       ? ` across ${ranked.shards.length} shards (${ranked.shards.map((s) => `${s.unit}:${s.docs}`).join(', ')})`
       : '';
+    const scope = sourceId
+      ? ` in ${dbSelect.options[dbSelect.selectedIndex].textContent.split(' (')[0]}`
+      : '';
     $('#search-meta').textContent =
-      `${res.candidates.length} candidates from MongoDB in ${res.tookMs.toFixed(0)} ms` +
+      `${res.candidates.length} candidates from MongoDB${scope} in ${res.tookMs.toFixed(0)} ms` +
       ` (query ${(t1 - t0).toFixed(0)} ms) - ranked on ${ranked.device.toUpperCase()}${shards} in ${(t2 - t1).toFixed(1)} ms` +
       `${res.capped ? ' - candidate cap reached, refine the query' : ''}` +
       ` - ${ranked.results.length} shown`;
@@ -228,9 +245,16 @@
     }).join('');
   }
 
+  // Query-type chip updates as you type; search only runs on button / Enter.
   input.addEventListener('input', () => {
-    clearTimeout(debounce);
-    debounce = setTimeout(runSearch, 250);
+    $('#query-type').textContent = `type: ${classifyPreview(input.value)}`;
+  });
+  searchBtn.addEventListener('click', () => { runSearch(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      runSearch();
+    }
   });
 
   /* ---------------------------- import ----------------------------- */
@@ -348,6 +372,7 @@
     refreshStorage();
     renderComputePlan().catch(() => {});
     await scanFiles(); // refresh imported / pending State from MongoDB
+    await refreshDatabaseSelector();
   });
 
   for (const id of ['#chk-parallel', '#workers-count', '#inflight-count', '#chk-gpu-normalize']) {
@@ -386,6 +411,7 @@
     refreshStatus();
     refreshStorage();
     await scanFiles(); // mark this file as imported in State
+    await refreshDatabaseSelector();
   }
 
   $('#btn-cancel').addEventListener('click', () => window.api.cancelImport());
@@ -524,6 +550,7 @@
     await renderHardware(false);
     await refreshStatus();
     await scanFiles();
+    await refreshDatabaseSelector();
     await refreshStorage();
     setInterval(refreshStatus, 15_000);
   })();

@@ -112,15 +112,18 @@ function registerIpc({ databasesDir, getWindow, pool, getHelperStatus, gpuFlags 
     });
   });
 
-  ipcMain.handle('search:run', async (_e, raw) => {
+  ipcMain.handle('databases:imported', async () => db.importedDatabases());
+
+  ipcMain.handle('search:run', async (_e, payload) => {
+    const raw = typeof payload === 'string' ? payload : (payload && payload.q);
+    const sourceId = typeof payload === 'object' && payload ? (payload.sourceId || null) : null;
     try {
       await db.connect();
       await db.ensureIndexes();
     } catch (err) {
       return { error: `MongoDB not reachable: ${err.message}`, candidates: [], tookMs: 0 };
     }
-    const out = await search(db.persons(), raw);
-    return out;
+    return search(db.persons(), raw, { sourceId });
   });
 
   /* ------------------------------ imports -------------------------------- */

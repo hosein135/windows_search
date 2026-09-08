@@ -53,12 +53,20 @@ h1 { font-size: 18px; margin: 0; font-weight: 600; }
 .tab-page.active { display: block; }
 
 .search-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
+#search-database {
+  flex: 0 0 auto; min-width: 160px; max-width: 220px;
+  padding: 10px 12px; font-size: 14px;
+  background: var(--panel2); color: var(--text);
+  border: 1px solid #2a3441; border-radius: 6px; outline: none;
+}
+#search-database:focus { border-color: var(--accent); }
 #search-input {
   flex: 1; padding: 10px 14px; font-size: 15px;
   background: var(--panel2); color: var(--text);
   border: 1px solid #2a3441; border-radius: 6px; outline: none;
 }
 #search-input:focus { border-color: var(--accent); }
+#btn-search { flex: 0 0 auto; padding: 10px 18px; }
 
 .muted { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
 code { background: var(--panel2); padding: 1px 6px; border-radius: 4px; }

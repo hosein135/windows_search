@@ -162,7 +162,37 @@ async function importedSourceStats() {
   }
 }
 
+/**
+ * Imported CSV "databases" (source layouts) present in MongoDB, with person counts.
+ * Source tags look like `${sourceId}:${filename}`; we group by sourceId.
+ */
+async function importedDatabases() {
+  const { SOURCES } = require('./schemas');
+  const stats = await importedSourceStats();
+  if (!stats.ok) return { ok: false, error: stats.error, databases: [] };
+
+  const byId = {};
+  for (const [tag, count] of Object.entries(stats.byTag)) {
+    const colon = tag.indexOf(':');
+    const id = colon >= 0 ? tag.slice(0, colon) : tag;
+    if (!id) continue;
+    byId[id] = (byId[id] || 0) + count;
+  }
+
+  const labelById = Object.fromEntries(SOURCES.map((s) => [s.id, s.label]));
+  const databases = Object.keys(byId)
+    .sort((a, b) => (labelById[a] || a).localeCompare(labelById[b] || b))
+    .map((id) => ({
+      id,
+      label: labelById[id] || id,
+      persons: byId[id],
+    }));
+
+  return { ok: true, databases };
+}
+
 module.exports = {
   connect, close, persons, rawDb, ensureIndexes, status, importedSourceStats,
+  importedDatabases,
   DEFAULT_URL, DB_NAME, PERSONS_COLLECTION,
 };
