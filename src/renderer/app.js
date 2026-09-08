@@ -336,7 +336,9 @@
         <td>${i + 1}</td>
         <td>${r.score}</td>
         <td>${hl(d.fullName || '', m & FIELD_BIT.searchName)}</td>
+        <td dir="auto">${esc(d.fatherName || '')}</td>
         <td>${hl(d.nationalCode || '', m & FIELD_BIT.nationalCode)}</td>
+        <td>${esc(d.birthDate || '')}</td>
         <td>${hl((d.mobiles || []).join(', '), m & FIELD_BIT.mobile)}</td>
         <td>${hl((d.cards || []).join(', '), m & FIELD_BIT.card)}</td>
         <td dir="auto">${esc(d.city || '')}</td>
