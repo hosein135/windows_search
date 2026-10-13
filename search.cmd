@@ -1,24 +1,27 @@
 @echo off
-REM One launcher for the search app:
 REM   search.cmd                         open the window
-REM   search.cmd علی --source mellat     print matches
-REM   search.cmd setup                   install Python, Tk, and DuckDB
+REM   search.cmd NAME --source mellat    print matches
+REM   search.cmd setup                   reinstall Python, Tk, and DuckDB
 
 setlocal
-REM %~dp0 ends in a backslash; "folder\" breaks cd because the slash escapes the quote.
 set "ROOT=%~dp0"
 cd /d "%ROOT%."
 set "PY=%ROOT%.venv\Scripts\python.exe"
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-if exist "%SystemRoot%\System32\chcp.com" "%SystemRoot%\System32\chcp.com" 65001 >nul
 
 if /I "%~1"=="setup" goto setup
 
 if not exist "%PY%" (
-    echo Run search.cmd setup first.
-    pause
-    exit /b 1
+    echo Python is not set up yet. Installing it now.
+    call :install
+    if not exist "%PY%" (
+        echo.
+        echo Setup failed. Python is still missing:
+        echo   %PY%
+        pause
+        exit /b 1
+    )
 )
 
 if "%~1"=="" goto window
@@ -37,7 +40,7 @@ if not %EXIT_CODE%==0 (
 exit /b %EXIT_CODE%
 
 :setup
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%setup.ps1"
+call :install
 set "EXIT_CODE=%ERRORLEVEL%"
 echo.
 if not %EXIT_CODE%==0 (
@@ -47,3 +50,7 @@ if not %EXIT_CODE%==0 (
 )
 pause
 exit /b %EXIT_CODE%
+
+:install
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%setup.ps1"
+exit /b %ERRORLEVEL%
