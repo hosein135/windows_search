@@ -1,5 +1,5 @@
 # Install a local Python environment and DuckDB.
-# Double-click setup.cmd, or run:  powershell -ExecutionPolicy Bypass -File setup.ps1
+# Run:  search.cmd setup
 
 $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
@@ -75,4 +75,4 @@ Write-Host 'Installing DuckDB...'
 if ($LASTEXITCODE -ne 0) { throw 'pip install failed' }
 
 Write-Host ''
-Write-Host 'Ready. Start the search window with gui.cmd'
+Write-Host 'Ready. Start the search window with search.cmd'
