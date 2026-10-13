@@ -1,56 +1,42 @@
 @echo off
+REM Launcher for search.ps1. Same shape as hosein135/recorder run.cmd:
+REM powershell.exe is loaded by full path, because it is often missing from PATH.
+REM Double-click this file, or run:  search.cmd
 REM   search.cmd                         open the window
 REM   search.cmd NAME --source mellat    print matches
-REM   search.cmd setup                   reinstall Python, Tk, and DuckDB
+REM   search.cmd setup                   install Python and DuckDB, then stop
 
 setlocal
-set "ROOT=%~dp0"
-cd /d "%ROOT%."
-set "PY=%ROOT%.venv\Scripts\python.exe"
-set "PYTHONUTF8=1"
-set "PYTHONIOENCODING=utf-8"
 
-if /I "%~1"=="setup" goto setup
+set "SCRIPT_DIR=%~dp0"
+set "PS1=%SCRIPT_DIR%search.ps1"
 
-if not exist "%PY%" (
-    echo Python is not set up yet. Installing it now.
-    call :install
-    if not exist "%PY%" (
-        echo.
-        echo Setup failed. Python is still missing:
-        echo   %PY%
-        pause
-        exit /b 1
-    )
-)
-
-if "%~1"=="" goto window
-
-"%PY%" -u -m searchapp search %*
-exit /b %ERRORLEVEL%
-
-:window
-"%PY%" -u -m searchapp
-set "EXIT_CODE=%ERRORLEVEL%"
-if not %EXIT_CODE%==0 (
-    echo.
-    echo search.cmd exited with code %EXIT_CODE%.
+if not exist "%PS1%" (
+    echo [search.cmd] ERROR: search.ps1 not found in:
+    echo   %SCRIPT_DIR%
     pause
+    exit /b 1
 )
-exit /b %EXIT_CODE%
 
-:setup
-call :install
+set "PS_EXE=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS_EXE%" set "PS_EXE=%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS_EXE%" set "PS_EXE=%SystemRoot%\SysWOW64\WindowsPowerShell\v1.0\powershell.exe"
+if not exist "%PS_EXE%" (
+    echo [search.cmd] ERROR: powershell.exe was not found.
+    echo   Expected:
+    echo   %SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+    pause
+    exit /b 1
+)
+
+if exist "%SystemRoot%\System32\chcp.com" "%SystemRoot%\System32\chcp.com" 65001 >nul
+
+"%PS_EXE%" -NoProfile -ExecutionPolicy Bypass -File "%PS1%" %*
 set "EXIT_CODE=%ERRORLEVEL%"
-echo.
-if not %EXIT_CODE%==0 (
-    echo search.cmd setup failed with code %EXIT_CODE%.
-) else (
-    echo search.cmd setup finished.
-)
-pause
-exit /b %EXIT_CODE%
 
-:install
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%setup.ps1"
-exit /b %ERRORLEVEL%
+echo.
+echo ============================================================
+echo search.ps1 has finished. Press any key to close this window.
+echo ============================================================
+pause >nul
+exit /b %EXIT_CODE%

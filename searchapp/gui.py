@@ -127,7 +127,7 @@ def _empty_result() -> dict:
 class SearchApp:
     def __init__(self, engine: SearchEngine):
         if tk is None or ttk is None:
-            raise RuntimeError("Tkinter is not available. Run search.cmd setup to install Python with Tk.")
+            raise RuntimeError("Tkinter is not available. Run search.cmd so Python can be installed.")
         _enable_dpi()
         self.engine = engine
         self._choices: list[tuple[str, str]] = [("All CSV files", "")]
@@ -356,7 +356,7 @@ def _enable_dpi() -> None:
 
 def run_gui(engine: SearchEngine) -> int:
     if tk is None:
-        print("Tkinter is not available. Run search.cmd setup to install Python with Tk.", file=sys.stderr)
+        print("Tkinter is not available. Run search.cmd so Python can be installed.", file=sys.stderr)
         engine.close()
         return 1
     try:
