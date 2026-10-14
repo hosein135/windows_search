@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import queue
 import sys
 import threading
 from collections import OrderedDict
@@ -13,6 +14,7 @@ except ImportError:  # pragma: no cover - setup installs a Python that includes 
     tk = None
     ttk = None
 
+from .catalog import scan_csv_files
 from .engine import SearchEngine
 from .normalize import QUERY_LABELS
 from .sources import DISPLAY_FIELDS
@@ -143,8 +145,15 @@ class SearchApp:
         self.root.minsize(900, 560)
         self.root.configure(bg=BG)
         self.query_var = tk.StringVar()
+        self._catalog_queue: queue.Queue = queue.Queue()
         self._build_style()
         self._build()
+        # Fill the file list on this thread. DuckDB row counts arrive later.
+        # Updating Tk from the loader thread never reaches the window.
+        self.apply_catalog({
+            "files": [item.as_dict() for item in scan_csv_files(self.engine.databases_dir)],
+            "warnings": [],
+        })
         self.root.after(50, self._load_catalog_async)
 
     def run(self) -> None:
@@ -319,13 +328,25 @@ class SearchApp:
 
     def _load_catalog_async(self) -> None:
         threading.Thread(target=self._catalog_worker, daemon=True).start()
+        self.root.after(100, self._poll_catalog)
 
     def _catalog_worker(self) -> None:
         try:
             catalog = self.engine.catalog()
         except Exception as exc:
             catalog = {"files": [], "warnings": [str(exc).splitlines()[0]]}
-        self.root.after(0, self.apply_catalog, catalog)
+        self._catalog_queue.put(catalog)
+
+    def _poll_catalog(self) -> None:
+        try:
+            catalog = self._catalog_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(100, self._poll_catalog)
+            return
+        if catalog.get("files"):
+            self.apply_catalog(catalog)
+        elif catalog.get("warnings"):
+            self._set_status("; ".join(catalog["warnings"]), error=True)
 
     def _fill_files(self, files: list[dict]) -> None:
         children = self.files.get_children()
@@ -333,7 +354,8 @@ class SearchApp:
             self.files.delete(*children)
         self.files.configure(height=min(max(len(files), 1), 12))
         if not files:
-            self.files.insert("", "end", values=("", "", "No CSV files in databases/", "", ""))
+            folder = self.engine.databases_dir
+            self.files.insert("", "end", values=("", str(folder), "No CSV files in this folder", "", ""))
             return
         for item in files:
             layout = item["source_label"] if item.get("known") else item.get("folder") or "CSV"

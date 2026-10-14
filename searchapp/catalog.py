@@ -24,6 +24,18 @@ class CsvFile:
             return f"{self.source_id}:{self.name}"
         return f"file:{self.folder}:{self.name}"
 
+    def as_dict(self, rows: int = 0) -> dict:
+        return {
+            "name": self.name,
+            "folder": self.folder,
+            "size_bytes": self.size_bytes,
+            "source_id": self.source_id,
+            "source_label": self.source_label,
+            "source_tag": self.source_tag,
+            "known": self.known,
+            "rows": rows,
+        }
+
 
 def scan_csv_files(databases_dir: Path) -> list[CsvFile]:
     root = Path(databases_dir)

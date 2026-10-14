@@ -136,16 +136,7 @@ class SearchEngine:
     def _catalog_payload(self) -> dict:
         return {
             "files": [
-                {
-                    "name": item.name,
-                    "folder": item.folder,
-                    "size_bytes": item.size_bytes,
-                    "source_id": item.source_id,
-                    "source_label": item.source_label,
-                    "source_tag": item.source_tag,
-                    "known": item.known,
-                    "rows": int(self._row_counts.get(item.source_tag, 0)),
-                }
+                item.as_dict(int(self._row_counts.get(item.source_tag, 0)))
                 for item in self._files
             ],
             "warnings": list(self._errors),
