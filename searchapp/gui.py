@@ -146,6 +146,7 @@ class SearchApp:
         self.root.configure(bg=BG)
         self.query_var = tk.StringVar()
         self._catalog_queue: queue.Queue = queue.Queue()
+        self._searching = False
         self._build_style()
         self._build()
         # Fill the file list on this thread. DuckDB row counts arrive later.
@@ -155,6 +156,7 @@ class SearchApp:
             "warnings": [],
         })
         self.root.after(50, self._load_catalog_async)
+        self.root.after(100, self._poll_catalog)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -212,7 +214,9 @@ class SearchApp:
                 value = row.get(key)
                 values.append("" if value is None else str(value))
             self.results.insert("", "end", values=values)
+        self.search_btn.configure(text="Search")
         self.search_btn.state(["!disabled"])
+        self._searching = False
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -310,43 +314,54 @@ class SearchApp:
         self.files.bind("<MouseWheel>", self._scroll_files)
 
     def on_search(self) -> None:
+        if self._searching:
+            return
         query = self.query_var.get().strip()
         if not query:
             self.show_result(_empty_result())
             return
+        self._searching = True
         self.search_btn.state(["disabled"])
+        self.search_btn.configure(text="Searching…")
         self._set_status("Searching…")
         source = self._source_value()
-        threading.Thread(target=self._search_worker, args=(query[:200], source), daemon=True).start()
+        threading.Thread(
+            target=self._search_worker,
+            args=(query[:200], source),
+            daemon=True,
+        ).start()
 
     def _search_worker(self, query: str, source: str) -> None:
         try:
             result = self.engine.search(query, source=source or None, limit=50)
         except Exception as exc:
             result = _empty_result() | {"error": str(exc).splitlines()[0]}
-        self.root.after(0, self.show_result, result)
+        self._catalog_queue.put(("search", result))
 
     def _load_catalog_async(self) -> None:
         threading.Thread(target=self._catalog_worker, daemon=True).start()
-        self.root.after(100, self._poll_catalog)
 
     def _catalog_worker(self) -> None:
         try:
             catalog = self.engine.catalog()
         except Exception as exc:
             catalog = {"files": [], "warnings": [str(exc).splitlines()[0]]}
-        self._catalog_queue.put(catalog)
+        self._catalog_queue.put(("catalog", catalog))
 
     def _poll_catalog(self) -> None:
         try:
-            catalog = self._catalog_queue.get_nowait()
+            while True:
+                kind, payload = self._catalog_queue.get_nowait()
+                if kind == "catalog":
+                    if payload.get("files"):
+                        self.apply_catalog(payload)
+                    elif payload.get("warnings"):
+                        self._set_status("; ".join(payload["warnings"]), error=True)
+                elif kind == "search":
+                    self.show_result(payload)
         except queue.Empty:
-            self.root.after(100, self._poll_catalog)
-            return
-        if catalog.get("files"):
-            self.apply_catalog(catalog)
-        elif catalog.get("warnings"):
-            self._set_status("; ".join(catalog["warnings"]), error=True)
+            pass
+        self.root.after(100, self._poll_catalog)
 
     def _fill_files(self, files: list[dict]) -> None:
         children = self.files.get_children()

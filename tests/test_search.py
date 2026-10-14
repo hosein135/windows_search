@@ -233,6 +233,15 @@ class GuiTests(unittest.TestCase):
         self.assertIn("فاطمه اسدی", values)
         self.assertIn("Bank Melli", values)
         self.assertEqual(len(app.files.get_children()), 1)
+        app.on_search()
+        self.assertTrue(app._searching)
+        app.on_search()
+        self.assertTrue(app._searching)
+        app.root.after(4000, app.root.quit)
+        app.root.mainloop()
+        self.assertFalse(app._searching)
+        self.assertEqual(app.search_btn.cget("text"), "Search")
+        self.assertEqual(len(app.results.get_children()), 1)
 
 
 class RepoDataTests(unittest.TestCase):
