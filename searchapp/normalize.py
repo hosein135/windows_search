@@ -137,4 +137,5 @@ QUERY_LABELS = {
     "card": "card",
     "any_id": "id",
     "name": "name",
+    "browse": "file",
 }

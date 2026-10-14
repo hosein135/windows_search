@@ -241,6 +241,49 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(app.results.item(app.results.get_children()[0], "values"), values)
         app._searching = False
 
+    def test_selected_file_limits_search_and_shows_rows(self):
+        from searchapp.gui import tk
+        if tk is None:
+            self.skipTest("tkinter is not installed")
+        from searchapp.gui import SearchApp
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        write_csv(root / "bank melli" / "Bank Melli DB1.csv", [
+            ["NATIONAL_CODE", "CARD_NO", "FULL_NAME", "BIRTH_DATE", "MOBILE"],
+            ["1000185000", "6037991100000000", "فاطمه اسدي", "1360-06-15", "09159595000"],
+        ])
+        write_csv(root / "bank mellat" / "Bank Mellat DB1.csv", [
+            ["NATIONAL_CODE", "ACCOUNT_NUMBER", "FULL_NAME", "FATHER_NAME", "ID_NUMBER",
+             "BIRTH_DATE", "CITY_NAME", "PROVINCE_NAME", "BIRTH_CITY", "BIRTH_PROVINCE",
+             "ADDRESS", "CARD_NO", "MOBILE"],
+            ["0532347226", "", "هادي حسن", "", "", "", "", "", "", "", "", "", ""],
+        ])
+        engine = SearchEngine(root)
+        self.addCleanup(engine.close)
+        app = SearchApp(engine)
+        self.addCleanup(app.root.destroy)
+        app.root.withdraw()
+        app.refresh_catalog()
+        melli_iid = next(iid for iid, tag in app._file_tags.items() if tag.startswith("melli:"))
+        app.files.selection_set(melli_iid)
+        app._on_file_picked()
+        shown = " ".join(
+            " ".join(app.results.item(child, "values"))
+            for child in app.results.get_children()
+        )
+        self.assertIn("1000185000", shown)
+        self.assertNotIn("0532347226", shown)
+        self.assertTrue(app._selected_source.startswith("melli:"))
+        app.query_var.set("0532347226")
+        app.on_search()
+        shown = " ".join(
+            " ".join(app.results.item(child, "values"))
+            for child in app.results.get_children()
+        )
+        self.assertNotIn("0532347226", shown)
+        self.assertIn("No matching rows", shown)
+
     def test_background_search_shows_rows(self):
         from searchapp.gui import tk
         if tk is None:

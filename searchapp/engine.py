@@ -107,6 +107,55 @@ class SearchEngine:
         result["took_ms"] = (time.perf_counter() - started) * 1000
         return result
 
+    def preview(self, source: str | None = None, limit: int = 50) -> dict:
+        """Return rows from one CSV, or from every CSV when source is empty."""
+        import time
+        started = time.perf_counter()
+        limit = max(1, min(int(limit or 50), 500))
+        source_key = (source or "").strip() or None
+        with self._lock:
+            self._refresh()
+            where = "TRUE"
+            params: list = []
+            if source_key:
+                where = "source_tag = ?" if ":" in source_key else "source_id = ?"
+                params.append(source_key)
+            params.append(limit)
+            result = {
+                "query": {"type": "browse", "value": source_key or ""},
+                "source": source_key,
+                "limit": limit,
+                "rows": [],
+                "matches": 0,
+                "shown": 0,
+                "took_ms": 0.0,
+                "warnings": list(self._errors),
+                "error": None,
+                "files": len(self._files),
+            }
+            try:
+                cur = self._db().execute(
+                    f"""
+                    SELECT * FROM (
+                      SELECT persons.*, 0 AS score, count(*) OVER () AS match_count
+                      FROM persons
+                      WHERE {where}
+                    ) AS hits
+                    ORDER BY file_name, full_name
+                    LIMIT ?
+                    """,
+                    params,
+                )
+                names = [item[0] for item in cur.description]
+                raw_rows = [dict(zip(names, row)) for row in cur.fetchall()]
+            except Exception as exc:
+                result["error"] = str(exc).splitlines()[0]
+                result["took_ms"] = (time.perf_counter() - started) * 1000
+                return result
+        result.update(_pack_rows(raw_rows))
+        result["took_ms"] = (time.perf_counter() - started) * 1000
+        return result
+
     def _search_locked(self, raw: str, source: str | None, limit: int) -> dict:
         query = classify_query(raw)
         limit = max(1, min(int(limit or 50), 500))

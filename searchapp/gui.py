@@ -96,6 +96,12 @@ def visible_columns(rows: list[dict]) -> list[tuple[str, str]]:
 def status_text(result: dict | None) -> str:
     if result is None or result.get("query", {}).get("type") == "empty":
         return EMPTY_STATUS
+    if result.get("query", {}).get("type") == "browse":
+        shown = int(result.get("shown") or 0)
+        matches = int(result.get("matches") or 0)
+        if matches and shown != matches:
+            return f"Showing {shown} of {matches} rows from the selected file"
+        return f"Showing {shown} rows from the selected file"
     if result.get("error"):
         return str(result["error"])
     kind = QUERY_LABELS.get(result["query"]["type"], result["query"]["type"])
@@ -146,6 +152,9 @@ class SearchApp:
         self.root.configure(bg=BG)
         self.query_var = tk.StringVar()
         self._searching = False
+        self._selected_source = ""
+        self._file_tags: dict[str, str] = {}
+        self._suppress_select = 0
         self._build_style()
         self._build()
         # Fill the file list on this thread. DuckDB row counts arrive later.
@@ -178,13 +187,17 @@ class SearchApp:
         self._choices = source_choices(catalog)
         self.source["values"] = [label for label, _value in self._choices]
         selected = next((index for index, (_label, value) in enumerate(self._choices) if value == current), 0)
-        self.source.current(selected)
-        file_list = catalog.get("files") or []
+        self._suppress_select += 1
+        try:
+            self.source.current(selected)
+            file_list = catalog.get("files") or []
+            self._fill_files(file_list)
+        finally:
+            self._suppress_select = max(0, self._suppress_select - 1)
         known = len(file_list)
         rows = sum(int(item.get("rows") or 0) for item in file_list)
         suffix = "" if known == 1 else "s"
         self.chip.configure(text=f"DuckDB · {known} file{suffix} · {rows} rows")
-        self._fill_files(catalog.get("files") or [])
         warnings = [item for item in (catalog.get("warnings") or []) if item]
         if warnings and not self.query_var.get().strip():
             self._set_status("; ".join(warnings), error=True)
@@ -208,9 +221,9 @@ class SearchApp:
         try:
             self._set_status(status_text(result), error=bool(result.get("error")))
             rows = result.get("rows") or []
-            shown = visible_columns(rows) if rows else [("n", "#"), ("score", "Score"), *DISPLAY_FIELDS]
+            shown = [("n", "#"), ("score", "Score"), *DISPLAY_FIELDS]
             self.results["displaycolumns"] = [key for key, _label in shown]
-            for key, label in shown:
+            for key, label in RESULT_COLUMNS:
                 self.results.heading(key, text=label)
             children = self.results.get_children()
             if children:
@@ -273,6 +286,7 @@ class SearchApp:
         self.source.pack(side="left")
         self.source["values"] = ["All CSV files"]
         self.source.current(0)
+        self.source.bind("<<ComboboxSelected>>", self._on_combo_picked)
         entry = ttk.Entry(bar, textvariable=self.query_var)
         entry.pack(side="left", fill="x", expand=True, padx=10)
         entry.bind("<Return>", lambda _event: self.on_search())
@@ -308,7 +322,7 @@ class SearchApp:
         ttk.Label(self.root, text="CSV files", style="Section.TLabel").pack(anchor="w", padx=16)
         ttk.Label(
             self.root,
-            text="Every CSV in these folders is loaded. The row count is how many records were read.",
+            text="Click a CSV to search only that file. Choose All CSV files to search every file.",
             style="Muted.TLabel",
         ).pack(anchor="w", padx=16, pady=(0, 4))
         files_frame = ttk.Frame(self.root)
@@ -333,6 +347,7 @@ class SearchApp:
         self.files.configure(yscrollcommand=files_scroll.set)
         self.files.pack(side="left", fill="both", expand=True)
         files_scroll.pack(side="right", fill="y")
+        self.files.bind("<<TreeviewSelect>>", self._on_file_picked)
         self.files.bind("<MouseWheel>", self._scroll_files)
 
     def on_search(self) -> None:
@@ -359,6 +374,12 @@ class SearchApp:
         except Exception as exc:
             return _empty_result() | {"error": str(exc).splitlines()[0]}
 
+    def _run_preview(self, source: str) -> dict:
+        try:
+            return self.engine.preview(source or None, limit=50)
+        except Exception as exc:
+            return _empty_result() | {"error": str(exc).splitlines()[0]}
+
     def _worker_loop(self) -> None:
         while True:
             job = self._jobs.get()
@@ -373,6 +394,8 @@ class SearchApp:
                 self._events.put(("catalog", payload))
             elif kind == "search":
                 self._events.put(("search", self._run_search(job[1], job[2])))
+            elif kind == "preview":
+                self._events.put(("search", self._run_preview(job[1])))
 
     def _poll(self) -> None:
         try:
@@ -400,33 +423,101 @@ class SearchApp:
             return
 
     def _fill_files(self, files: list[dict]) -> None:
-        children = self.files.get_children()
-        if children:
-            self.files.delete(*children)
-        self.files.configure(height=min(max(len(files), 1), 12))
-        if not files:
-            folder = self.engine.databases_dir
-            self.files.insert("", "end", values=("", str(folder), "No CSV files in this folder", "", ""))
+        self._suppress_select += 1
+        try:
+            children = self.files.get_children()
+            if children:
+                self.files.delete(*children)
+            self._file_tags = {}
+            self.files.configure(height=min(max(len(files), 1), 12))
+            if not files:
+                folder = self.engine.databases_dir
+                self.files.insert("", "end", values=("", str(folder), "No CSV files in this folder", "", ""))
+                return
+            selected_iid = ""
+            for index, item in enumerate(files):
+                iid = f"file-{index}"
+                tag = item.get("source_tag") or ""
+                self._file_tags[iid] = tag
+                layout = item["source_label"] if item.get("known") else item.get("folder") or "CSV"
+                self.files.insert("", "end", iid=iid, values=(
+                    item.get("folder") or "",
+                    item.get("name") or "",
+                    layout,
+                    str(int(item.get("rows") or 0)),
+                    format_bytes(int(item.get("size_bytes") or 0)),
+                ))
+                if tag and tag == self._selected_source:
+                    selected_iid = iid
+            if selected_iid:
+                self.files.selection_set(selected_iid)
+                self.files.see(selected_iid)
+        finally:
+            self._suppress_select = max(0, self._suppress_select - 1)
+
+    def _on_file_picked(self, _event=None) -> None:
+        if self._suppress_select or self._searching:
             return
-        for item in files:
-            layout = item["source_label"] if item.get("known") else item.get("folder") or "CSV"
-            self.files.insert("", "end", values=(
-                item.get("folder") or "",
-                item.get("name") or "",
-                layout,
-                str(int(item.get("rows") or 0)),
-                format_bytes(int(item.get("size_bytes") or 0)),
-            ))
+        selected = self.files.selection()
+        if not selected:
+            return
+        self._set_source(self._file_tags.get(selected[0], ""))
+        if not self.query_var.get().strip():
+            self._browse_selected()
+
+    def _on_combo_picked(self, _event=None) -> None:
+        if self._suppress_select or self._searching:
+            return
+        chosen = ""
+        label = self.source.get()
+        for text, value in self._choices:
+            if text == label:
+                chosen = value
+                break
+        self._set_source(chosen)
+        if not self.query_var.get().strip() and chosen:
+            self._browse_selected()
+
+    def _set_source(self, tag: str) -> None:
+        self._selected_source = tag or ""
+        self._suppress_select += 1
+        try:
+            for index, (_label, value) in enumerate(self._choices):
+                if value == self._selected_source:
+                    self.source.current(index)
+                    break
+            for iid, file_tag in self._file_tags.items():
+                if file_tag == self._selected_source:
+                    self.files.selection_set(iid)
+                    self.files.see(iid)
+                    break
+            else:
+                if not self._selected_source:
+                    self.files.selection_remove(self.files.selection())
+        finally:
+            self._suppress_select = max(0, self._suppress_select - 1)
+
+    def _browse_selected(self) -> None:
+        if self._searching:
+            return
+        source = self._selected_source
+        if not source:
+            return
+        self._searching = True
+        self.search_btn.state(["disabled"])
+        self.search_btn.configure(text="Searching…")
+        self._set_status("Reading the selected file…")
+        self.root.update_idletasks()
+        if self._worker is None:
+            self.show_result(self._run_preview(source))
+            return
+        self._jobs.put(("preview", source))
 
     def _scroll_files(self, event):
         self.files.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _source_value(self) -> str:
-        label = self.source.get()
-        for text, value in self._choices:
-            if text == label:
-                return value
-        return ""
+        return self._selected_source or ""
 
     def _set_status(self, text: str, error: bool = False) -> None:
         self.status.configure(text=text, style="Error.TLabel" if error else "Muted.TLabel")
