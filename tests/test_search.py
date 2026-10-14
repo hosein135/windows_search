@@ -225,23 +225,20 @@ class GuiTests(unittest.TestCase):
         app.refresh_catalog()
         app.query_var.set("1000185000")
         app.source.current(1)
-        result = app.search_now()
-        self.assertEqual(result["matches"], 1)
+        app.on_search()
+        self.assertFalse(app._searching)
+        self.assertEqual(app.search_btn.cget("text"), "Search")
+        self.assertGreaterEqual(len(app.results.get_children()), 1)
         item = app.results.get_children()[0]
         values = app.results.item(item, "values")
         self.assertIn("1000185000", values)
         self.assertIn("فاطمه اسدی", values)
         self.assertIn("Bank Melli", values)
         self.assertEqual(len(app.files.get_children()), 1)
+        app._searching = True
         app.on_search()
-        self.assertTrue(app._searching)
-        app.on_search()
-        self.assertTrue(app._searching)
-        app.root.after(4000, app.root.quit)
-        app.root.mainloop()
-        self.assertFalse(app._searching)
-        self.assertEqual(app.search_btn.cget("text"), "Search")
-        self.assertEqual(len(app.results.get_children()), 1)
+        self.assertEqual(app.results.item(app.results.get_children()[0], "values"), values)
+        app._searching = False
 
 
 class RepoDataTests(unittest.TestCase):

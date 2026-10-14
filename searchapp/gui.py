@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import queue
 import sys
-import threading
 from collections import OrderedDict
 
 try:
@@ -145,7 +143,6 @@ class SearchApp:
         self.root.minsize(900, 560)
         self.root.configure(bg=BG)
         self.query_var = tk.StringVar()
-        self._catalog_queue: queue.Queue = queue.Queue()
         self._searching = False
         self._build_style()
         self._build()
@@ -155,8 +152,7 @@ class SearchApp:
             "files": [item.as_dict() for item in scan_csv_files(self.engine.databases_dir)],
             "warnings": [],
         })
-        self.root.after(50, self._load_catalog_async)
-        self.root.after(100, self._poll_catalog)
+        self.root.after(50, self._load_catalog)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -196,27 +192,38 @@ class SearchApp:
         return result
 
     def show_result(self, result: dict) -> None:
-        self._set_status(status_text(result), error=bool(result.get("error")))
-        rows = result.get("rows") or []
-        shown = visible_columns(rows) if rows else [("n", "#"), ("score", "Score"), *DISPLAY_FIELDS]
-        self.results["displaycolumns"] = [key for key, _label in shown]
-        for key, label in shown:
-            self.results.heading(key, text=label)
-        children = self.results.get_children()
-        if children:
-            self.results.delete(*children)
-        for index, row in enumerate(rows, start=1):
-            values = []
-            for key, _label in RESULT_COLUMNS:
-                if key == "n":
-                    values.append(str(index))
-                    continue
-                value = row.get(key)
-                values.append("" if value is None else str(value))
-            self.results.insert("", "end", values=values)
-        self.search_btn.configure(text="Search")
-        self.search_btn.state(["!disabled"])
+        try:
+            self._set_status(status_text(result), error=bool(result.get("error")))
+            rows = result.get("rows") or []
+            shown = visible_columns(rows) if rows else [("n", "#"), ("score", "Score"), *DISPLAY_FIELDS]
+            self.results["displaycolumns"] = [key for key, _label in shown]
+            for key, label in shown:
+                self.results.heading(key, text=label)
+            children = self.results.get_children()
+            if children:
+                self.results.delete(*children)
+            if rows:
+                for index, row in enumerate(rows, start=1):
+                    values = []
+                    for key, _label in RESULT_COLUMNS:
+                        if key == "n":
+                            values.append(str(index))
+                            continue
+                        value = row.get(key)
+                        values.append("" if value is None else str(value))
+                    self.results.insert("", "end", values=values)
+            elif result.get("query", {}).get("type") not in (None, "empty"):
+                placeholder = [""] * len(RESULT_COLUMNS)
+                placeholder[2] = "No matching rows"
+                self.results.insert("", "end", values=placeholder)
+        finally:
+            self._search_done()
+
+    def _search_done(self) -> None:
         self._searching = False
+        if self.search_btn is not None:
+            self.search_btn.configure(text="Search")
+            self.search_btn.state(["!disabled"])
 
     def _build_style(self) -> None:
         style = ttk.Style(self.root)
@@ -263,6 +270,7 @@ class SearchApp:
         self.status = ttk.Label(self.root, text=EMPTY_STATUS, style="Muted.TLabel", wraplength=1100, justify="left")
         self.status.pack(fill="x", padx=16, pady=(0, 8))
 
+        ttk.Label(self.root, text="Results", style="Section.TLabel").pack(anchor="w", padx=16)
         results_frame = ttk.Frame(self.root)
         results_frame.pack(fill="both", expand=True, padx=16, pady=(0, 8))
         results_frame.rowconfigure(0, weight=1)
@@ -272,6 +280,7 @@ class SearchApp:
             columns=[key for key, _label in RESULT_COLUMNS],
             show="headings",
             selectmode="browse",
+            height=12,
         )
         for key, label in RESULT_COLUMNS:
             self.results.heading(key, text=label)
@@ -316,7 +325,7 @@ class SearchApp:
     def on_search(self) -> None:
         if self._searching:
             return
-        query = self.query_var.get().strip()
+        query = self.query_var.get().strip()[:200]
         if not query:
             self.show_result(_empty_result())
             return
@@ -324,44 +333,30 @@ class SearchApp:
         self.search_btn.state(["disabled"])
         self.search_btn.configure(text="Searching…")
         self._set_status("Searching…")
+        self.root.update_idletasks()
         source = self._source_value()
-        threading.Thread(
-            target=self._search_worker,
-            args=(query[:200], source),
-            daemon=True,
-        ).start()
-
-    def _search_worker(self, query: str, source: str) -> None:
         try:
             result = self.engine.search(query, source=source or None, limit=50)
         except Exception as exc:
             result = _empty_result() | {"error": str(exc).splitlines()[0]}
-        self._catalog_queue.put(("search", result))
+        self.show_result(result)
 
-    def _load_catalog_async(self) -> None:
-        threading.Thread(target=self._catalog_worker, daemon=True).start()
-
-    def _catalog_worker(self) -> None:
+    def _load_catalog(self) -> None:
+        if self._searching:
+            self.root.after(200, self._load_catalog)
+            return
+        self._searching = True
         try:
             catalog = self.engine.catalog()
         except Exception as exc:
-            catalog = {"files": [], "warnings": [str(exc).splitlines()[0]]}
-        self._catalog_queue.put(("catalog", catalog))
-
-    def _poll_catalog(self) -> None:
-        try:
-            while True:
-                kind, payload = self._catalog_queue.get_nowait()
-                if kind == "catalog":
-                    if payload.get("files"):
-                        self.apply_catalog(payload)
-                    elif payload.get("warnings"):
-                        self._set_status("; ".join(payload["warnings"]), error=True)
-                elif kind == "search":
-                    self.show_result(payload)
-        except queue.Empty:
-            pass
-        self.root.after(100, self._poll_catalog)
+            self._set_status(str(exc).splitlines()[0], error=True)
+            return
+        finally:
+            self._search_done()
+        if catalog.get("files"):
+            self.apply_catalog(catalog)
+        elif catalog.get("warnings"):
+            self._set_status("; ".join(catalog["warnings"]), error=True)
 
     def _fill_files(self, files: list[dict]) -> None:
         children = self.files.get_children()
