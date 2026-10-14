@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import queue
 import sys
+import threading
 from collections import OrderedDict
 
 try:
@@ -152,10 +154,21 @@ class SearchApp:
             "files": [item.as_dict() for item in scan_csv_files(self.engine.databases_dir)],
             "warnings": [],
         })
-        self.root.after(50, self._load_catalog)
+        self._jobs: queue.Queue = queue.Queue()
+        self._events: queue.Queue = queue.Queue()
+        self._worker: threading.Thread | None = None
 
     def run(self) -> None:
-        self.root.mainloop()
+        self._worker = threading.Thread(target=self._worker_loop, daemon=True)
+        self._worker.start()
+        self._jobs.put(("catalog",))
+        if not self.query_var.get().strip():
+            self._set_status("Reading CSV files…")
+        self._poll()
+        try:
+            self.root.mainloop()
+        finally:
+            self._jobs.put(("stop",))
 
     def refresh_catalog(self) -> None:
         self.apply_catalog(self.engine.catalog())
@@ -335,28 +348,56 @@ class SearchApp:
         self._set_status("Searching…")
         self.root.update_idletasks()
         source = self._source_value()
-        try:
-            result = self.engine.search(query, source=source or None, limit=50)
-        except Exception as exc:
-            result = _empty_result() | {"error": str(exc).splitlines()[0]}
-        self.show_result(result)
+        if self._worker is None:
+            self.show_result(self._run_search(query, source))
+            return
+        self._jobs.put(("search", query, source))
 
-    def _load_catalog(self) -> None:
-        if self._searching:
-            self.root.after(200, self._load_catalog)
-            return
-        self._searching = True
+    def _run_search(self, query: str, source: str) -> dict:
         try:
-            catalog = self.engine.catalog()
+            return self.engine.search(query, source=source or None, limit=50)
         except Exception as exc:
-            self._set_status(str(exc).splitlines()[0], error=True)
+            return _empty_result() | {"error": str(exc).splitlines()[0]}
+
+    def _worker_loop(self) -> None:
+        while True:
+            job = self._jobs.get()
+            kind = job[0]
+            if kind == "stop":
+                return
+            if kind == "catalog":
+                try:
+                    payload = self.engine.catalog()
+                except Exception as exc:
+                    payload = {"files": [], "warnings": [str(exc).splitlines()[0]]}
+                self._events.put(("catalog", payload))
+            elif kind == "search":
+                self._events.put(("search", self._run_search(job[1], job[2])))
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                kind, payload = self._events.get_nowait()
+                try:
+                    if kind == "catalog":
+                        if payload.get("files"):
+                            self.apply_catalog(payload)
+                        if not self._searching and not self.query_var.get().strip():
+                            if payload.get("warnings"):
+                                self._set_status("; ".join(payload["warnings"]), error=True)
+                            else:
+                                self._set_status(EMPTY_STATUS)
+                    elif kind == "search":
+                        self.show_result(payload)
+                except Exception as exc:
+                    self._set_status(str(exc).splitlines()[0], error=True)
+                    self._search_done()
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(100, self._poll)
+        except tk.TclError:
             return
-        finally:
-            self._search_done()
-        if catalog.get("files"):
-            self.apply_catalog(catalog)
-        elif catalog.get("warnings"):
-            self._set_status("; ".join(catalog["warnings"]), error=True)
 
     def _fill_files(self, files: list[dict]) -> None:
         children = self.files.get_children()

@@ -63,7 +63,7 @@ class SearchEngine:
     def __init__(self, databases_dir: Path | None = None):
         self.databases_dir = Path(databases_dir) if databases_dir else DATABASES_DIR
         self._lock = threading.Lock()
-        self._con = duckdb.connect()
+        self._con = None
         self._signature: tuple | None = None
         self._files: list[CsvFile] = []
         self._errors: list[str] = []
@@ -72,9 +72,15 @@ class SearchEngine:
 
     def close(self) -> None:
         with self._lock:
-            if self._con is not None:
-                self._con.close()
-                self._con = None
+            con = self._con
+            self._con = None
+            if con is not None:
+                con.close()
+
+    def _db(self):
+        if self._con is None:
+            self._con = duckdb.connect()
+        return self._con
 
     @property
     def connection(self):
@@ -89,7 +95,7 @@ class SearchEngine:
         """Return (text, id, phone) after the SQL cleaners. Used to keep SQL and Python in step."""
         with self._lock:
             self._ensure_macros()
-            return self._con.execute(
+            return self._db().execute(
                 "SELECT ws_clean_text(?), ws_clean_id(?), ws_clean_phone(?)",
                 [value, value, value],
             ).fetchone()
@@ -123,7 +129,7 @@ class SearchEngine:
                 return result
             try:
                 sql, params = _search_sql(query, source_key, limit)
-                cur = self._con.execute(sql, params)
+                cur = self._db().execute(sql, params)
                 names = [item[0] for item in cur.description]
                 raw_rows = [dict(zip(names, row)) for row in cur.fetchall()]
             except Exception as exc:
@@ -163,7 +169,7 @@ class SearchEngine:
                 else:
                     encoding, columns = self._inspect(item.path, header=True)
                     branch = _generic_branch_sql(item, columns, encoding)
-                self._con.execute(f"SELECT * FROM ({branch}) WHERE FALSE")
+                self._db().execute(f"SELECT * FROM ({branch}) WHERE FALSE")
                 branches.append((item.source_tag, branch))
             except Exception as exc:
                 errors.append(f"{item.folder}/{item.name}: {str(exc).splitlines()[0]}")
@@ -172,12 +178,12 @@ class SearchEngine:
         empty_sql = f"CREATE TABLE persons AS SELECT {nulls} WHERE FALSE"
         counts: dict[str, int] = {}
         try:
-            self._con.execute("DROP TABLE IF EXISTS persons")
-            self._con.execute(empty_sql)
+            self._db().execute("DROP TABLE IF EXISTS persons")
+            self._db().execute(empty_sql)
             for tag, branch in branches:
                 try:
-                    self._con.execute(f"INSERT INTO persons BY NAME SELECT * FROM ({branch})")
-                    counts[tag] = int(self._con.execute(
+                    self._db().execute(f"INSERT INTO persons BY NAME SELECT * FROM ({branch})")
+                    counts[tag] = int(self._db().execute(
                         "SELECT count(*) FROM persons WHERE source_tag = ?",
                         [tag],
                     ).fetchone()[0])
@@ -186,8 +192,8 @@ class SearchEngine:
                     counts[tag] = 0
         except Exception as exc:
             errors.append(str(exc).splitlines()[0])
-            self._con.execute("DROP TABLE IF EXISTS persons")
-            self._con.execute(empty_sql)
+            self._db().execute("DROP TABLE IF EXISTS persons")
+            self._db().execute(empty_sql)
             self._row_counts = {}
             self._errors = errors
             self._signature = None
@@ -251,14 +257,14 @@ class SearchEngine:
             """,
         ]
         for statement in statements:
-            self._con.execute(statement)
+            self._db().execute(statement)
         self._macros = True
 
     def _inspect(self, path: Path, header: bool) -> tuple[str, list[str]]:
         last: Exception | None = None
         for encoding in ("utf-8", "cp1256"):
             try:
-                cur = self._con.execute(
+                cur = self._db().execute(
                     f"SELECT * FROM {_read_csv(path, encoding, header)} LIMIT 0"
                 )
                 names = [item[0] for item in cur.description]

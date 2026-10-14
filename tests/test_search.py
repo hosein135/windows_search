@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -239,6 +240,38 @@ class GuiTests(unittest.TestCase):
         app.on_search()
         self.assertEqual(app.results.item(app.results.get_children()[0], "values"), values)
         app._searching = False
+
+    def test_background_search_shows_rows(self):
+        from searchapp.gui import tk
+        if tk is None:
+            self.skipTest("tkinter is not installed")
+        from searchapp.gui import SearchApp
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        write_csv(root / "bank melli" / "Bank Melli DB1.csv", [
+            ["NATIONAL_CODE", "CARD_NO", "FULL_NAME", "BIRTH_DATE", "MOBILE"],
+            ["1000185000", "6037991100000000", "فاطمه اسدي", "1360-06-15", "09159595000"],
+        ])
+        engine = SearchEngine(root)
+        self.addCleanup(engine.close)
+        app = SearchApp(engine)
+        self.addCleanup(app.root.destroy)
+        app.root.withdraw()
+        app._worker = threading.Thread(target=app._worker_loop, daemon=True)
+        app._worker.start()
+        app._jobs.put(("catalog",))
+        app._poll()
+        app.query_var.set("1000185000")
+        app.on_search()
+        self.assertTrue(app._searching)
+        app.on_search()
+        app.root.after(8000, app.root.quit)
+        app.root.mainloop()
+        self.assertFalse(app._searching)
+        self.assertEqual(app.search_btn.cget("text"), "Search")
+        values = app.results.item(app.results.get_children()[0], "values")
+        self.assertIn("1000185000", values)
 
 
 class RepoDataTests(unittest.TestCase):
