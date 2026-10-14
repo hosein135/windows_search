@@ -19,10 +19,10 @@ class CsvFile:
     known: bool
 
     @property
-    def source_tag(self) -> str | None:
-        if not self.source_id:
-            return None
-        return f"{self.source_id}:{self.name}"
+    def source_tag(self) -> str:
+        if self.source_id:
+            return f"{self.source_id}:{self.name}"
+        return f"file:{self.folder}:{self.name}"
 
 
 def scan_csv_files(databases_dir: Path) -> list[CsvFile]:

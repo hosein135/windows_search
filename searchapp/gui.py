@@ -63,8 +63,9 @@ def format_bytes(size: int) -> str:
 
 def source_choices(catalog: dict) -> list[tuple[str, str]]:
     """Display label and the source id or `source:filename` tag passed to search."""
+    files = catalog.get("files") or []
     groups: OrderedDict[str, dict] = OrderedDict()
-    for item in catalog.get("files") or []:
+    for item in files:
         if not item.get("known"):
             continue
         group = groups.setdefault(item["source_id"], {"label": item["source_label"], "files": []})
@@ -74,6 +75,11 @@ def source_choices(catalog: dict) -> list[tuple[str, str]]:
         choices.append((f"All {group['label']}", source_id))
         for item in group["files"]:
             choices.append((f"{group['label']} / {item['name']}", item.get("source_tag") or ""))
+    for item in files:
+        if item.get("known"):
+            continue
+        folder = item.get("folder") or "CSV"
+        choices.append((f"{folder} / {item['name']}", item.get("source_tag") or ""))
     return choices
 
 
@@ -153,9 +159,11 @@ class SearchApp:
         self.source["values"] = [label for label, _value in self._choices]
         selected = next((index for index, (_label, value) in enumerate(self._choices) if value == current), 0)
         self.source.current(selected)
-        known = sum(1 for item in catalog.get("files") or [] if item.get("known"))
+        file_list = catalog.get("files") or []
+        known = len(file_list)
+        rows = sum(int(item.get("rows") or 0) for item in file_list)
         suffix = "" if known == 1 else "s"
-        self.chip.configure(text=f"DuckDB · {known} file{suffix}")
+        self.chip.configure(text=f"DuckDB · {known} file{suffix} · {rows} rows")
         self._fill_files(catalog.get("files") or [])
         warnings = [item for item in (catalog.get("warnings") or []) if item]
         if warnings and not self.query_var.get().strip():
@@ -265,30 +273,32 @@ class SearchApp:
         ttk.Label(self.root, text="CSV files", style="Section.TLabel").pack(anchor="w", padx=16)
         ttk.Label(
             self.root,
-            text="DuckDB reads these files when they are added or changed.",
+            text="Every CSV in these folders is loaded. The row count is how many records were read.",
             style="Muted.TLabel",
         ).pack(anchor="w", padx=16, pady=(0, 4))
         files_frame = ttk.Frame(self.root)
         files_frame.pack(fill="x", padx=16, pady=(0, 14))
         self.files = ttk.Treeview(
             files_frame,
-            columns=("folder", "file", "layout", "size"),
+            columns=("folder", "file", "layout", "rows", "size"),
             show="headings",
-            height=5,
+            height=8,
             selectmode="browse",
         )
         for key, label, width in (
             ("folder", "Folder", 160),
             ("file", "File", 280),
-            ("layout", "Layout", 180),
+            ("layout", "Layout", 160),
+            ("rows", "Rows", 80),
             ("size", "Size", 90),
         ):
             self.files.heading(key, text=label)
             self.files.column(key, width=width, anchor="w")
         files_scroll = ttk.Scrollbar(files_frame, orient="vertical", command=self.files.yview)
         self.files.configure(yscrollcommand=files_scroll.set)
-        self.files.pack(side="left", fill="x", expand=True)
+        self.files.pack(side="left", fill="both", expand=True)
         files_scroll.pack(side="right", fill="y")
+        self.files.bind("<MouseWheel>", self._scroll_files)
 
     def on_search(self) -> None:
         query = self.query_var.get().strip()
@@ -321,17 +331,22 @@ class SearchApp:
         children = self.files.get_children()
         if children:
             self.files.delete(*children)
+        self.files.configure(height=min(max(len(files), 1), 12))
         if not files:
-            self.files.insert("", "end", values=("", "", "No CSV files in databases/", ""))
+            self.files.insert("", "end", values=("", "", "No CSV files in databases/", "", ""))
             return
         for item in files:
-            layout = item["source_label"] if item.get("known") else "Unrecognized layout"
+            layout = item["source_label"] if item.get("known") else item.get("folder") or "CSV"
             self.files.insert("", "end", values=(
                 item.get("folder") or "",
                 item.get("name") or "",
                 layout,
+                str(int(item.get("rows") or 0)),
                 format_bytes(int(item.get("size_bytes") or 0)),
             ))
+
+    def _scroll_files(self, event):
+        self.files.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _source_value(self) -> str:
         label = self.source.get()

@@ -67,6 +67,7 @@ class SearchEngine:
         self._signature: tuple | None = None
         self._files: list[CsvFile] = []
         self._errors: list[str] = []
+        self._row_counts: dict[str, int] = {}
         self._macros = False
 
     def close(self) -> None:
@@ -116,7 +117,7 @@ class SearchEngine:
                 "took_ms": 0.0,
                 "warnings": list(self._errors),
                 "error": None,
-                "files": sum(1 for item in self._files if item.known),
+                "files": len(self._files),
             }
             if query["type"] == "empty":
                 return result
@@ -143,6 +144,7 @@ class SearchEngine:
                     "source_label": item.source_label,
                     "source_tag": item.source_tag,
                     "known": item.known,
+                    "rows": int(self._row_counts.get(item.source_tag, 0)),
                 }
                 for item in self._files
             ],
@@ -154,47 +156,52 @@ class SearchEngine:
         signature = tuple(
             (str(item.path), item.path.stat().st_mtime_ns, item.path.stat().st_size)
             for item in files
-            if item.known
         )
         self._files = files
         if signature == self._signature and self._macros:
             return
         self._ensure_macros()
         errors: list[str] = []
-        branches: list[str] = []
+        branches: list[tuple[str, str]] = []
         for item in files:
-            if not item.known:
-                continue
-            source = resolve_source(item.folder, item.name)
-            if source is None:
-                continue
+            source = resolve_source(item.folder, item.name) if item.known else None
             try:
-                encoding, columns = self._inspect(item.path)
-                branch = _branch_sql(item, source, columns, encoding)
+                if source is not None:
+                    encoding, columns = self._inspect(item.path, header=False)
+                    branch = _branch_sql(item, source, columns, encoding)
+                else:
+                    encoding, columns = self._inspect(item.path, header=True)
+                    branch = _generic_branch_sql(item, columns, encoding)
                 self._con.execute(f"SELECT * FROM ({branch}) WHERE FALSE")
-                branches.append(branch)
+                branches.append((item.source_tag, branch))
             except Exception as exc:
                 errors.append(f"{item.folder}/{item.name}: {str(exc).splitlines()[0]}")
-        # Materialize once per file change. Later searches filter this table
-        # instead of re-planning a clean over every CSV.
+        # One file at a time, so a bad CSV does not drop the rest.
         nulls = ", ".join(f"NULL::VARCHAR AS {name}" for name in PERSON_COLUMNS)
         empty_sql = f"CREATE TABLE persons AS SELECT {nulls} WHERE FALSE"
+        counts: dict[str, int] = {}
         try:
             self._con.execute("DROP TABLE IF EXISTS persons")
-            if not branches:
-                self._con.execute(empty_sql)
-            else:
-                union = " UNION ALL BY NAME ".join(
-                    f"SELECT * FROM ({branch})" for branch in branches
-                )
-                self._con.execute(f"CREATE TABLE persons AS {union}")
+            self._con.execute(empty_sql)
+            for tag, branch in branches:
+                try:
+                    self._con.execute(f"INSERT INTO persons BY NAME SELECT * FROM ({branch})")
+                    counts[tag] = int(self._con.execute(
+                        "SELECT count(*) FROM persons WHERE source_tag = ?",
+                        [tag],
+                    ).fetchone()[0])
+                except Exception as exc:
+                    errors.append(f"{tag}: {str(exc).splitlines()[0]}")
+                    counts[tag] = 0
         except Exception as exc:
             errors.append(str(exc).splitlines()[0])
             self._con.execute("DROP TABLE IF EXISTS persons")
             self._con.execute(empty_sql)
+            self._row_counts = {}
             self._errors = errors
             self._signature = None
             return
+        self._row_counts = counts
         self._errors = errors
         self._signature = signature
 
@@ -256,26 +263,32 @@ class SearchEngine:
             self._con.execute(statement)
         self._macros = True
 
-    def _inspect(self, path: Path) -> tuple[str, list[str]]:
+    def _inspect(self, path: Path, header: bool) -> tuple[str, list[str]]:
         last: Exception | None = None
         for encoding in ("utf-8", "cp1256"):
             try:
                 cur = self._con.execute(
-                    f"SELECT * FROM {_read_csv(path, encoding)} LIMIT 0"
+                    f"SELECT * FROM {_read_csv(path, encoding, header)} LIMIT 0"
                 )
-                return encoding, [item[0] for item in cur.description]
+                names = [item[0] for item in cur.description]
+                if names:
+                    return encoding, names
             except Exception as exc:
                 last = exc
         assert last is not None
         raise last
 
 
-def _read_csv(path: Path, encoding: str) -> str:
+def _read_csv(path: Path, encoding: str, header: bool = False) -> str:
+    # parallel=false and sample_size=-1 make DuckDB scan every row instead of
+    # stopping after a sniff sample.
     return (
         "read_csv("
         + sql_str(path.resolve().as_posix())
-        + ", header=false, all_varchar=true, delim=',', quote='\"', escape='\"', "
-        + "strict_mode=false, null_padding=true, ignore_errors=true, encoding="
+        + ", header=" + ("true" if header else "false")
+        + ", all_varchar=true, delim=',', quote='\"', escape='\"', "
+        + "strict_mode=false, null_padding=true, ignore_errors=true, "
+        + "parallel=false, sample_size=-1, encoding="
         + sql_str(encoding)
         + ")"
     )
@@ -382,6 +395,61 @@ def _branch_sql(item: CsvFile, source: Source, columns: list[str], encoding: str
       national_code, full_name, first_name, last_name, mobile, phone, card, account
     ) IS NOT NULL
     """
+
+
+def _generic_branch_sql(item: CsvFile, columns: list[str], encoding: str) -> str:
+    """Read a CSV whose folder name is not one of the known layouts."""
+    id_exprs = [f"ws_clean_id({quote_ident(name)})" for name in columns]
+    phone_exprs = [f"ws_clean_phone({quote_ident(name)})" for name in columns]
+    text_exprs = [f"ws_clean_text({quote_ident(name)})" for name in columns]
+    blob = "concat_ws(' ', " + ", ".join(text_exprs) + ")" if text_exprs else "NULL"
+    return f"""
+    SELECT
+      'file' AS source_id,
+      {sql_str(item.folder)} AS source_label,
+      {sql_str(item.name)} AS file_name,
+      {sql_str(item.source_tag)} AS source_tag,
+      {_first_match(id_exprs, "^[0-9]{10}$")} AS national_code,
+      NULLIF(trim({blob}), '') AS full_name,
+      NULL::VARCHAR AS first_name,
+      NULL::VARCHAR AS last_name,
+      NULL::VARCHAR AS father_name,
+      NULL::VARCHAR AS id_number,
+      NULL::VARCHAR AS birth_date,
+      NULL::VARCHAR AS city,
+      NULL::VARCHAR AS province,
+      NULL::VARCHAR AS birth_city,
+      NULL::VARCHAR AS birth_province,
+      NULL::VARCHAR AS address,
+      NULL::VARCHAR AS po_box,
+      {_first_match(phone_exprs, "^0?9[0-9]{9}$")} AS mobile,
+      NULL::VARCHAR AS phone,
+      {_first_match(id_exprs, "^[0-9]{16}$")} AS card,
+      NULL::VARCHAR AS account,
+      NULL::VARCHAR AS email,
+      NULL::VARCHAR AS define_number,
+      NULL::VARCHAR AS define_num_old,
+      NULL::VARCHAR AS branch,
+      CASE
+        WHEN {_first_match(phone_exprs, "^9[0-9]{9}$")} IS NOT NULL
+          THEN '0' || {_first_match(phone_exprs, "^9[0-9]{9}$")}
+        ELSE {_first_match(phone_exprs, "^0?9[0-9]{9}$")}
+      END AS mobile_key,
+      lower(ws_fold_digits(NULLIF(trim({blob}), ''))) AS name_key,
+      lower(ws_fold_digits(NULLIF(trim({blob}), ''))) AS search_blob
+    FROM {_read_csv(item.path, encoding, header=True)} AS raw
+    WHERE NULLIF(trim({blob}), '') IS NOT NULL
+    """
+
+
+def _first_match(exprs: list[str], pattern: str) -> str:
+    if not exprs:
+        return "NULL::VARCHAR"
+    cases = ", ".join(
+        "CASE WHEN regexp_full_match(" + expr + ", '" + pattern + "') THEN " + expr + " END"
+        for expr in exprs
+    )
+    return "COALESCE(" + cases + ")"
 
 
 def _in_clause(column: str, values: list[str]) -> tuple[str, list[str]]:

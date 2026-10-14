@@ -152,10 +152,14 @@ class EngineTests(unittest.TestCase):
         by_national = self.engine.search("1000000037")
         self.assertEqual(by_national["rows"][0]["file_name"], "935-1.csv")
 
-    def test_headers_and_unknown_files_are_excluded(self):
+    def test_headers_are_excluded_and_other_csvs_are_read(self):
         listed = self.engine.catalog()["files"]
-        self.assertTrue(any(not item["known"] and item["name"] == "random.csv" for item in listed))
-        self.assertEqual(self.engine.search("ZZZUNIQUE")["matches"], 0)
+        other = next(item for item in listed if item["name"] == "random.csv")
+        self.assertFalse(other["known"])
+        self.assertGreater(other["rows"], 0)
+        found = self.engine.search("ZZZUNIQUE")
+        self.assertEqual(found["matches"], 1)
+        self.assertEqual(found["rows"][0]["file_name"], "random.csv")
         leaked = self.engine.connection.execute(
             """
             SELECT full_name FROM persons
@@ -246,6 +250,7 @@ class RepoDataTests(unittest.TestCase):
         known = [item for item in catalog["files"] if item["known"]]
         self.assertGreaterEqual(len(known), 4)
         self.assertEqual(catalog["warnings"], [])
+        self.assertTrue(all(item["rows"] > 0 for item in catalog["files"]))
         result = self.engine.search("1000000000")
         self.assertIsNone(result["error"])
         self.assertGreaterEqual(result["matches"], 1)
